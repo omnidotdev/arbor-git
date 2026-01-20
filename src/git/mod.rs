@@ -73,7 +73,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            base_path: PathBuf::from("/var/lib/arbor/repos"),
+            base_path: PathBuf::from("/var/lib/arbor-git"),
             max_repo_size: 1024 * 1024 * 1024, // 1GB
             default_branch: "main".to_string(),
         }
@@ -83,7 +83,7 @@ impl Default for StorageConfig {
 impl StorageConfig {
     pub fn from_env() -> Self {
         Self {
-            base_path: std::env::var("GIT_REPOS_PATH").map_or_else(|_| PathBuf::from("/var/lib/arbor/repos"), PathBuf::from),
+            base_path: std::env::var("STORAGE_PATH").map_or_else(|_| PathBuf::from("/var/lib/arbor-git"), PathBuf::from),
             max_repo_size: std::env::var("GIT_MAX_REPO_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
