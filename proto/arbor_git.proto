@@ -1,0 +1,457 @@
+syntax = "proto3";
+
+package arbor.git.v1;
+
+// ============================================================================
+// Core Git Service
+// ============================================================================
+
+service GitService {
+  // Repository lifecycle
+  rpc InitRepository(InitRepositoryRequest) returns (InitRepositoryResponse);
+  rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteRepositoryResponse);
+  rpc RepositoryExists(RepositoryExistsRequest) returns (RepositoryExistsResponse);
+  rpc GetRepositoryInfo(GetRepositoryInfoRequest) returns (RepositoryInfo);
+
+  // References
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+  rpc ResolveRef(ResolveRefRequest) returns (ResolveRefResponse);
+  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
+  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse);
+  rpc CreateTag(CreateTagRequest) returns (CreateTagResponse);
+  rpc DeleteTag(DeleteTagRequest) returns (DeleteTagResponse);
+
+  // Commits
+  rpc GetCommit(GetCommitRequest) returns (Commit);
+  rpc GetCommitLog(GetCommitLogRequest) returns (stream Commit);
+  rpc GetCommitAncestors(GetCommitAncestorsRequest) returns (stream Commit);
+
+  // Trees & Blobs
+  rpc GetTree(GetTreeRequest) returns (GetTreeResponse);
+  rpc GetBlob(GetBlobRequest) returns (stream BlobChunk);
+  rpc GetBlobInfo(GetBlobInfoRequest) returns (BlobInfo);
+
+  // Diff
+  rpc GetDiff(GetDiffRequest) returns (stream DiffEntry);
+  rpc GetFileDiff(GetFileDiffRequest) returns (FileDiff);
+
+  // Advanced operations
+  rpc Merge(MergeRequest) returns (MergeResponse);
+  rpc Rebase(RebaseRequest) returns (RebaseResponse);
+  rpc CherryPick(CherryPickRequest) returns (CherryPickResponse);
+
+  // Pack operations (for Smart HTTP protocol)
+  rpc UploadPack(stream UploadPackRequest) returns (stream UploadPackResponse);
+  rpc ReceivePack(stream ReceivePackRequest) returns (stream ReceivePackResponse);
+
+  // Batch operations
+  rpc CheckObjectsExist(CheckObjectsExistRequest) returns (CheckObjectsExistResponse);
+}
+
+// ============================================================================
+// Repository Messages
+// ============================================================================
+
+message RepositoryPath {
+  string owner = 1;
+  string name = 2;
+}
+
+message InitRepositoryRequest {
+  RepositoryPath repository = 1;
+  string default_branch = 2;
+}
+
+message InitRepositoryResponse {
+  bool created = 1;
+  string path = 2;
+}
+
+message DeleteRepositoryRequest {
+  RepositoryPath repository = 1;
+}
+
+message DeleteRepositoryResponse {
+  bool deleted = 1;
+}
+
+message RepositoryExistsRequest {
+  RepositoryPath repository = 1;
+}
+
+message RepositoryExistsResponse {
+  bool exists = 1;
+}
+
+message GetRepositoryInfoRequest {
+  RepositoryPath repository = 1;
+}
+
+message RepositoryInfo {
+  RepositoryPath repository = 1;
+  string default_branch = 2;
+  uint64 size_bytes = 3;
+  uint32 commit_count = 4;
+  uint32 branch_count = 5;
+  uint32 tag_count = 6;
+  string head_oid = 7;
+}
+
+// ============================================================================
+// Reference Messages
+// ============================================================================
+
+message Ref {
+  string name = 1;           // e.g., "refs/heads/main"
+  string short_name = 2;     // e.g., "main"
+  string oid = 3;
+  RefType type = 4;
+  bool is_default = 5;
+}
+
+enum RefType {
+  REF_TYPE_UNSPECIFIED = 0;
+  REF_TYPE_BRANCH = 1;
+  REF_TYPE_TAG = 2;
+  REF_TYPE_REMOTE = 3;
+}
+
+message ListRefsRequest {
+  RepositoryPath repository = 1;
+  RefType filter_type = 2;   // Optional: filter by type
+  string pattern = 3;        // Optional: glob pattern
+}
+
+message ListRefsResponse {
+  repeated Ref refs = 1;
+}
+
+message ResolveRefRequest {
+  RepositoryPath repository = 1;
+  string ref = 2;            // Can be branch name, tag, or full ref
+}
+
+message ResolveRefResponse {
+  string oid = 1;
+  string resolved_ref = 2;   // Full ref path
+}
+
+message CreateBranchRequest {
+  RepositoryPath repository = 1;
+  string name = 2;
+  string start_point = 3;    // OID or ref to start from
+}
+
+message CreateBranchResponse {
+  Ref branch = 1;
+}
+
+message DeleteBranchRequest {
+  RepositoryPath repository = 1;
+  string name = 2;
+  bool force = 3;
+}
+
+message DeleteBranchResponse {
+  bool deleted = 1;
+}
+
+message CreateTagRequest {
+  RepositoryPath repository = 1;
+  string name = 2;
+  string target = 3;         // OID or ref
+  optional string message = 4;  // If set, creates annotated tag
+  optional GitSignature tagger = 5;
+}
+
+message CreateTagResponse {
+  Ref tag = 1;
+}
+
+message DeleteTagRequest {
+  RepositoryPath repository = 1;
+  string name = 2;
+}
+
+message DeleteTagResponse {
+  bool deleted = 1;
+}
+
+// ============================================================================
+// Commit Messages
+// ============================================================================
+
+message GitSignature {
+  string name = 1;
+  string email = 2;
+  int64 timestamp = 3;       // Unix timestamp
+  int32 offset_minutes = 4;  // Timezone offset
+}
+
+message Commit {
+  string oid = 1;
+  string message = 2;
+  GitSignature author = 3;
+  GitSignature committer = 4;
+  repeated string parent_oids = 5;
+  string tree_oid = 6;
+}
+
+message GetCommitRequest {
+  RepositoryPath repository = 1;
+  string oid = 2;
+}
+
+message GetCommitLogRequest {
+  RepositoryPath repository = 1;
+  string start_ref = 2;      // Branch, tag, or OID
+  uint32 limit = 3;          // Max commits to return (0 = unlimited)
+  uint32 skip = 4;           // Skip N commits
+  optional string path = 5;  // Filter by file path
+}
+
+message GetCommitAncestorsRequest {
+  RepositoryPath repository = 1;
+  string oid = 2;
+  uint32 limit = 3;
+}
+
+// ============================================================================
+// Tree & Blob Messages
+// ============================================================================
+
+message TreeEntry {
+  string name = 1;
+  string oid = 2;
+  TreeEntryMode mode = 3;
+  TreeEntryType type = 4;
+  optional uint64 size = 5;  // Only for blobs
+}
+
+enum TreeEntryMode {
+  TREE_ENTRY_MODE_UNSPECIFIED = 0;
+  TREE_ENTRY_MODE_FILE = 1;           // 100644
+  TREE_ENTRY_MODE_EXECUTABLE = 2;     // 100755
+  TREE_ENTRY_MODE_SYMLINK = 3;        // 120000
+  TREE_ENTRY_MODE_TREE = 4;           // 040000
+  TREE_ENTRY_MODE_SUBMODULE = 5;      // 160000
+}
+
+enum TreeEntryType {
+  TREE_ENTRY_TYPE_UNSPECIFIED = 0;
+  TREE_ENTRY_TYPE_BLOB = 1;
+  TREE_ENTRY_TYPE_TREE = 2;
+  TREE_ENTRY_TYPE_COMMIT = 3;
+}
+
+message GetTreeRequest {
+  RepositoryPath repository = 1;
+  string ref = 2;            // Branch, tag, or OID
+  string path = 3;           // Path within tree (empty = root)
+  bool recursive = 4;        // Recursively list all entries
+}
+
+message GetTreeResponse {
+  string tree_oid = 1;
+  repeated TreeEntry entries = 2;
+}
+
+message GetBlobRequest {
+  RepositoryPath repository = 1;
+  string oid = 2;
+}
+
+message BlobChunk {
+  bytes data = 1;
+  bool is_last = 2;
+}
+
+message GetBlobInfoRequest {
+  RepositoryPath repository = 1;
+  string ref = 2;
+  string path = 3;
+}
+
+message BlobInfo {
+  string oid = 1;
+  uint64 size = 2;
+  bool is_binary = 3;
+  optional string mime_type = 4;
+}
+
+// ============================================================================
+// Diff Messages
+// ============================================================================
+
+message GetDiffRequest {
+  RepositoryPath repository = 1;
+  string base_ref = 2;       // Base commit/ref
+  string head_ref = 3;       // Head commit/ref
+  optional string path = 4;  // Filter to specific path
+}
+
+message DiffEntry {
+  string path = 1;
+  DiffStatus status = 2;
+  optional string old_path = 3;  // For renames
+  string old_oid = 4;
+  string new_oid = 5;
+  uint32 additions = 6;
+  uint32 deletions = 7;
+}
+
+enum DiffStatus {
+  DIFF_STATUS_UNSPECIFIED = 0;
+  DIFF_STATUS_ADDED = 1;
+  DIFF_STATUS_DELETED = 2;
+  DIFF_STATUS_MODIFIED = 3;
+  DIFF_STATUS_RENAMED = 4;
+  DIFF_STATUS_COPIED = 5;
+  DIFF_STATUS_TYPE_CHANGED = 6;
+}
+
+message GetFileDiffRequest {
+  RepositoryPath repository = 1;
+  string base_ref = 2;
+  string head_ref = 3;
+  string path = 4;
+  uint32 context_lines = 5;  // Lines of context (default: 3)
+}
+
+message FileDiff {
+  string path = 1;
+  DiffStatus status = 2;
+  repeated DiffHunk hunks = 3;
+  bool is_binary = 4;
+}
+
+message DiffHunk {
+  int32 old_start = 1;
+  int32 old_lines = 2;
+  int32 new_start = 3;
+  int32 new_lines = 4;
+  string header = 5;
+  repeated DiffLine lines = 6;
+}
+
+message DiffLine {
+  DiffLineType type = 1;
+  string content = 2;
+  optional int32 old_line_number = 3;
+  optional int32 new_line_number = 4;
+}
+
+enum DiffLineType {
+  DIFF_LINE_TYPE_UNSPECIFIED = 0;
+  DIFF_LINE_TYPE_CONTEXT = 1;
+  DIFF_LINE_TYPE_ADDITION = 2;
+  DIFF_LINE_TYPE_DELETION = 3;
+}
+
+// ============================================================================
+// Advanced Operations
+// ============================================================================
+
+message MergeRequest {
+  RepositoryPath repository = 1;
+  string base_ref = 2;
+  string head_ref = 3;
+  MergeStrategy strategy = 4;
+  optional string commit_message = 5;
+  optional GitSignature author = 6;
+}
+
+enum MergeStrategy {
+  MERGE_STRATEGY_UNSPECIFIED = 0;
+  MERGE_STRATEGY_MERGE = 1;
+  MERGE_STRATEGY_SQUASH = 2;
+  MERGE_STRATEGY_REBASE = 3;
+}
+
+message MergeResponse {
+  bool success = 1;
+  optional string merge_commit_oid = 2;
+  repeated ConflictInfo conflicts = 3;
+}
+
+message ConflictInfo {
+  string path = 1;
+  string base_oid = 2;
+  string ours_oid = 3;
+  string theirs_oid = 4;
+}
+
+message RebaseRequest {
+  RepositoryPath repository = 1;
+  string branch = 2;
+  string onto = 3;
+  bool interactive = 4;
+  optional GitSignature committer = 5;
+}
+
+message RebaseResponse {
+  bool success = 1;
+  repeated string rewritten_commits = 2;
+  repeated ConflictInfo conflicts = 3;
+}
+
+message CherryPickRequest {
+  RepositoryPath repository = 1;
+  repeated string commit_oids = 2;
+  string target_branch = 3;
+  optional GitSignature committer = 4;
+}
+
+message CherryPickResponse {
+  bool success = 1;
+  repeated string new_commit_oids = 2;
+  repeated ConflictInfo conflicts = 3;
+}
+
+// ============================================================================
+// Pack Protocol (Smart HTTP)
+// ============================================================================
+
+message UploadPackRequest {
+  oneof request {
+    UploadPackInit init = 1;
+    bytes data = 2;
+  }
+}
+
+message UploadPackInit {
+  RepositoryPath repository = 1;
+}
+
+message UploadPackResponse {
+  bytes data = 1;
+}
+
+message ReceivePackRequest {
+  oneof request {
+    ReceivePackInit init = 1;
+    bytes data = 2;
+  }
+}
+
+message ReceivePackInit {
+  RepositoryPath repository = 1;
+  string user_id = 2;        // For authorization
+}
+
+message ReceivePackResponse {
+  bytes data = 1;
+}
+
+// ============================================================================
+// Batch Operations
+// ============================================================================
+
+message CheckObjectsExistRequest {
+  RepositoryPath repository = 1;
+  repeated string oids = 2;
+}
+
+message CheckObjectsExistResponse {
+  map<string, bool> exists = 1;
+}

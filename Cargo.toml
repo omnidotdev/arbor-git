@@ -1,0 +1,77 @@
+[package]
+name = "arbor-git"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Omni <team@omni.dev>"]
+description = "High-performance Git backend service for Arbor"
+license = "MIT"
+repository = "https://github.com/omnidotdev/arbor-git"
+homepage = "https://arbor.omni.dev"
+keywords = ["git", "gitoxide", "grpc", "backend"]
+categories = ["development-tools"]
+readme = "README.md"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC
+tonic = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+
+# HTTP server (for Git Smart HTTP protocol)
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+
+# Git - gitoxide
+gix = { version = "0.70", features = ["blocking-http-transport-reqwest-rust-tls"] }
+gix-hash = "0.16"
+gix-object = "0.48"
+gix-pack = "0.57"
+gix-protocol = "0.49"
+gix-transport = "0.46"
+gix-ref = "0.51"
+gix-traverse = "0.46"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database (for repository metadata)
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+
+# Streaming
+tokio-stream = "0.1"
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+futures = "0.3"
+async-stream = "0.3"
+
+# Config
+dotenvy = "0.15"
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "arbor-git"
+path = "src/main.rs"
