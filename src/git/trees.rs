@@ -28,10 +28,10 @@ pub enum EntryType {
 impl From<EntryKind> for EntryType {
     fn from(kind: EntryKind) -> Self {
         match kind {
-            EntryKind::Blob | EntryKind::BlobExecutable => EntryType::Blob,
-            EntryKind::Tree => EntryType::Tree,
-            EntryKind::Commit => EntryType::Commit,
-            EntryKind::Link => EntryType::Link,
+            EntryKind::Blob | EntryKind::BlobExecutable => Self::Blob,
+            EntryKind::Tree => Self::Tree,
+            EntryKind::Commit => Self::Commit,
+            EntryKind::Link => Self::Link,
         }
     }
 }
@@ -44,7 +44,7 @@ pub struct BlobInfo {
 }
 
 impl TreeService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 
@@ -92,7 +92,7 @@ impl TreeService {
                     (subtree, format!("{}/", p.trim_end_matches('/')))
                 } else {
                     return Err(GitError::InvalidRef {
-                        reference: format!("{} is not a directory", p),
+                        reference: format!("{p} is not a directory"),
                     });
                 }
             }
@@ -105,7 +105,7 @@ impl TreeService {
         for entry in target_tree.iter() {
             let entry = entry.map_err(|e| GitError::Gix(e.to_string()))?;
             let entry_name = entry.filename().to_string();
-            let entry_path = format!("{}{}", base_path, entry_name);
+            let entry_path = format!("{base_path}{entry_name}");
             let entry_type = EntryType::from(entry.mode().kind());
 
             // Get size for blobs
@@ -121,7 +121,7 @@ impl TreeService {
                 name: entry_name,
                 path: entry_path,
                 oid: entry.object_id().to_string(),
-                mode: entry.mode().0 as u32,
+                mode: u32::from(entry.mode().0),
                 entry_type,
                 size,
             });
@@ -157,7 +157,7 @@ impl TreeService {
             .find_blob(id)
             .map_err(|_| GitError::ObjectNotFound { oid: oid.to_string() })?;
 
-        Ok(blob.data.to_vec())
+        Ok(blob.data.clone())
     }
 
     /// Get blob content by path
@@ -197,7 +197,7 @@ impl TreeService {
 
         if !entry.mode().is_blob() {
             return Err(GitError::InvalidRef {
-                reference: format!("{} is not a file", path),
+                reference: format!("{path} is not a file"),
             });
         }
 
@@ -205,7 +205,7 @@ impl TreeService {
             .find_blob(entry.object_id())
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
-        Ok(blob.data.to_vec())
+        Ok(blob.data.clone())
     }
 
     /// Get blob info without content
@@ -279,7 +279,7 @@ impl TreeService {
                     (subtree, format!("{}/", p.trim_end_matches('/')))
                 } else {
                     return Err(GitError::InvalidRef {
-                        reference: format!("{} is not a directory", p),
+                        reference: format!("{p} is not a directory"),
                     });
                 }
             }
@@ -311,7 +311,7 @@ impl TreeService {
         for entry in tree.iter() {
             let entry = entry.map_err(|e| GitError::Gix(e.to_string()))?;
             let entry_name = entry.filename().to_string();
-            let entry_path = format!("{}{}", base_path, entry_name);
+            let entry_path = format!("{base_path}{entry_name}");
             let entry_type = EntryType::from(entry.mode().kind());
 
             let size = if entry_type == EntryType::Blob {
@@ -326,7 +326,7 @@ impl TreeService {
                 name: entry_name,
                 path: entry_path.clone(),
                 oid: entry.object_id().to_string(),
-                mode: entry.mode().0 as u32,
+                mode: u32::from(entry.mode().0),
                 entry_type,
                 size,
             });
@@ -334,7 +334,7 @@ impl TreeService {
             // Recurse into subtrees
             if entry_type == EntryType::Tree && current_depth < max_depth {
                 if let Ok(subtree) = repo.find_tree(entry.object_id()) {
-                    let subtree_base = format!("{}/", entry_path);
+                    let subtree_base = format!("{entry_path}/");
                     self.collect_tree_entries(
                         repo,
                         &subtree,

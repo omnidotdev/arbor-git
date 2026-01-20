@@ -23,7 +23,7 @@ pub enum RefType {
 }
 
 impl RefService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 
@@ -82,8 +82,7 @@ impl RefService {
 
             let is_default = default_branch
                 .as_ref()
-                .map(|db| db == &short_name)
-                .unwrap_or(false);
+                .is_some_and(|db| db == &short_name);
 
             result.push(RefInfo {
                 name: full_name,
@@ -114,9 +113,7 @@ impl RefService {
         // Try to get the full ref name if it's a named reference
         let resolved_ref = repo
             .find_reference(reference)
-            .ok()
-            .map(|r| r.name().as_bstr().to_string())
-            .unwrap_or_else(|| reference.to_string());
+            .ok().map_or_else(|| reference.to_string(), |r| r.name().as_bstr().to_string());
 
         Ok((oid, resolved_ref))
     }
@@ -140,12 +137,12 @@ impl RefService {
             })?;
 
         // Create the branch reference
-        let ref_name = format!("refs/heads/{}", branch_name);
+        let ref_name = format!("refs/heads/{branch_name}");
         repo.reference(
             ref_name.as_str(),
             target_id.detach(),
             gix::refs::transaction::PreviousValue::MustNotExist,
-            format!("branch: Created branch {}", branch_name),
+            format!("branch: Created branch {branch_name}"),
         )
         .map_err(|e| GitError::Gix(e.to_string()))?;
 
@@ -158,8 +155,7 @@ impl RefService {
 
         let is_default = default_branch
             .as_ref()
-            .map(|db| db == branch_name)
-            .unwrap_or(false);
+            .is_some_and(|db| db == branch_name);
 
         Ok(RefInfo {
             name: ref_name,
@@ -178,7 +174,7 @@ impl RefService {
         let ref_name = if branch_name.starts_with("refs/") {
             branch_name.to_string()
         } else {
-            format!("refs/heads/{}", branch_name)
+            format!("refs/heads/{branch_name}")
         };
 
         // Check if branch exists
@@ -225,7 +221,7 @@ impl RefService {
                 reference: target.to_string(),
             })?;
 
-        let ref_name = format!("refs/tags/{}", tag_name);
+        let ref_name = format!("refs/tags/{tag_name}");
 
         // For now, create lightweight tags
         // TODO: Support annotated tags with gitoxide when API stabilizes
@@ -233,7 +229,7 @@ impl RefService {
             ref_name.as_str(),
             target_id.detach(),
             gix::refs::transaction::PreviousValue::MustNotExist,
-            format!("tag: Created tag {}", tag_name),
+            format!("tag: Created tag {tag_name}"),
         )
         .map_err(|e| GitError::Gix(e.to_string()))?;
 
@@ -254,7 +250,7 @@ impl RefService {
         let ref_name = if tag_name.starts_with("refs/") {
             tag_name.to_string()
         } else {
-            format!("refs/tags/{}", tag_name)
+            format!("refs/tags/{tag_name}")
         };
 
         let reference = repo.find_reference(&ref_name).map_err(|_| GitError::RefNotFound {

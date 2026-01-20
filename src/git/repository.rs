@@ -9,7 +9,7 @@ pub struct RepositoryService {
 }
 
 impl RepositoryService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 
@@ -37,7 +37,7 @@ impl RepositoryService {
 
         // Set default branch in HEAD
         let head_path = path.join("HEAD");
-        fs::write(&head_path, format!("ref: refs/heads/{}\n", branch))?;
+        fs::write(&head_path, format!("ref: refs/heads/{branch}\n"))?;
 
         info!(path = %path.display(), branch = branch, "Initialized bare repository");
 
@@ -97,36 +97,30 @@ impl RepositoryService {
             .head_ref()
             .ok()
             .flatten()
-            .map(|r| {
-                r.name()
-                    .shorten()
-                    .to_string()
-            })
-            .unwrap_or_else(|| self.config.default_branch.clone());
+            .map_or_else(
+                || self.config.default_branch.clone(),
+                |r| r.name().shorten().to_string(),
+            );
 
         // Count branches
         let branch_count = repo
             .references()
             .ok()
-            .map(|refs| {
+            .map_or(0, |refs| {
                 refs.local_branches()
                     .ok()
-                    .map(|b| b.count())
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0) as u32;
+                    .map_or(0, Iterator::count)
+            }) as u32;
 
         // Count tags
         let tag_count = repo
             .references()
             .ok()
-            .map(|refs| {
+            .map_or(0, |refs| {
                 refs.tags()
                     .ok()
-                    .map(|t| t.count())
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0) as u32;
+                    .map_or(0, Iterator::count)
+            }) as u32;
 
         // Calculate size
         let size_bytes = calculate_dir_size(&path)?;
@@ -178,19 +172,13 @@ fn calculate_dir_size(path: &Path) -> Result<u64> {
 
 fn count_commits(repo: &gix::Repository) -> u32 {
     // Try to count commits by traversing from HEAD
-    let head = match repo.head_id() {
-        Ok(id) => id,
-        Err(_) => return 0,
+    let Ok(head) = repo.head_id() else {
+        return 0;
     };
 
-    let walk = match repo.rev_walk([head]) {
-        walk => walk,
-    };
+    let walk = repo.rev_walk([head]);
 
-    match walk.all() {
-        Ok(iter) => iter.count() as u32,
-        Err(_) => 0,
-    }
+    walk.all().map_or(0, |iter| iter.count() as u32)
 }
 
 #[cfg(test)]

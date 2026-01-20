@@ -61,7 +61,7 @@ pub enum CherryPickStatus {
 }
 
 impl OperationsService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 
@@ -154,7 +154,7 @@ impl OperationsService {
 
         // Create merge commit
         let _msg = message.unwrap_or_else(|| {
-            Box::leak(format!("Merge {} into {}", head_ref, base_ref).into_boxed_str())
+            Box::leak(format!("Merge {head_ref} into {base_ref}").into_boxed_str())
         });
 
         warn!("Merge commit creation not fully implemented - returning theoretical result");
@@ -432,22 +432,22 @@ impl OperationsService {
         // Detect conflicts
         for (path, our_change) in &ours_map {
             if let Some(their_change) = theirs_map.get(path) {
-                if our_change.new_oid != their_change.new_oid {
+                if our_change.new_oid == their_change.new_oid {
+                    merged_files.push(path.clone());
+                } else {
                     conflicts.push(ConflictInfo {
                         path: path.clone(),
                         ours_oid: our_change.new_oid.clone(),
                         theirs_oid: their_change.new_oid.clone(),
                         ancestor_oid: our_change.old_oid.clone(),
                     });
-                } else {
-                    merged_files.push(path.clone());
                 }
             } else {
                 merged_files.push(path.clone());
             }
         }
 
-        for (path, _) in &theirs_map {
+        for path in theirs_map.keys() {
             if !ours_map.contains_key(path) {
                 merged_files.push(path.clone());
             }

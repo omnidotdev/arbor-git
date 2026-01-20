@@ -15,7 +15,7 @@ use crate::git::{
     trees::TreeService,
     StorageConfig,
 };
-use crate::proto::*;
+use crate::proto::{git_service_server, InitRepositoryRequest, InitRepositoryResponse, DeleteRepositoryRequest, DeleteRepositoryResponse, RepositoryExistsRequest, RepositoryExistsResponse, GetRepositoryInfoRequest, RepositoryInfo, RepositoryPath, ListRefsRequest, ListRefsResponse, Ref, RefType, ResolveRefRequest, ResolveRefResponse, CreateBranchRequest, CreateBranchResponse, DeleteBranchRequest, DeleteBranchResponse, CreateTagRequest, CreateTagResponse, DeleteTagRequest, DeleteTagResponse, GetCommitRequest, Commit, GetCommitLogRequest, GetCommitAncestorsRequest, GetTreeRequest, GetTreeResponse, TreeEntry, BlobChunk, GetBlobRequest, GetBlobInfoRequest, BlobInfo, DiffEntry, GetDiffRequest, GetFileDiffRequest, FileDiff, MergeRequest, MergeResponse, RebaseRequest, RebaseResponse, CherryPickRequest, CherryPickResponse, UploadPackResponse, UploadPackRequest, ReceivePackResponse, ReceivePackRequest, CheckObjectsExistRequest, CheckObjectsExistResponse, GitSignature, TreeEntryMode, TreeEntryType, DiffStatus, DiffLineType};
 
 pub struct GitServiceImpl {
     repo_service: RepositoryService,
@@ -140,7 +140,6 @@ impl git_service_server::GitService for GitServiceImpl {
         let repo = req.repository.ok_or_else(|| Status::invalid_argument("repository required"))?;
 
         let filter_type = match req.filter_type {
-            0 => None,
             1 => Some(InternalRefType::Branch),
             2 => Some(InternalRefType::Tag),
             3 => Some(InternalRefType::Remote),
@@ -461,7 +460,7 @@ impl git_service_server::GitService for GitServiceImpl {
             .map_err(|e| Status::not_found(e.to_string()))?;
 
         // Check if binary
-        let is_binary = blob_data.get(..8192).map(|d| d.contains(&0)).unwrap_or(false);
+        let is_binary = blob_data.get(..8192).is_some_and(|d| d.contains(&0));
 
         Ok(Response::new(BlobInfo {
             oid: String::new(), // Would need to compute or retrieve
@@ -600,16 +599,16 @@ impl git_service_server::GitService for GitServiceImpl {
         let req = request.into_inner();
         let repo = req.repository.ok_or_else(|| Status::invalid_argument("repository required"))?;
 
-        let author = req.author.map(|a| crate::git::commits::GitActor {
-            name: a.name,
-            email: a.email,
-            timestamp: a.timestamp,
-            offset_minutes: a.offset_minutes,
-        }).unwrap_or_else(|| crate::git::commits::GitActor {
+        let author = req.author.map_or_else(|| crate::git::commits::GitActor {
             name: "arbor-git".to_string(),
             email: "git@arbor.dev".to_string(),
             timestamp: chrono::Utc::now().timestamp(),
             offset_minutes: 0,
+        }, |a| crate::git::commits::GitActor {
+            name: a.name,
+            email: a.email,
+            timestamp: a.timestamp,
+            offset_minutes: a.offset_minutes,
         });
 
         match self.ops_service.merge(
@@ -797,27 +796,28 @@ fn commit_to_proto(commit: crate::git::commits::CommitInfo) -> Commit {
     }
 }
 
-fn entry_mode_to_proto(mode: u32) -> i32 {
+const fn entry_mode_to_proto(mode: u32) -> i32 {
     match mode {
-        0o100644 => TreeEntryMode::File as i32,
-        0o100755 => TreeEntryMode::Executable as i32,
-        0o120000 => TreeEntryMode::Symlink as i32,
-        0o040000 => TreeEntryMode::Tree as i32,
-        0o160000 => TreeEntryMode::Submodule as i32,
+        0o10_0644 => TreeEntryMode::File as i32,
+        0o10_0755 => TreeEntryMode::Executable as i32,
+        0o12_0000 => TreeEntryMode::Symlink as i32,
+        0o04_0000 => TreeEntryMode::Tree as i32,
+        0o16_0000 => TreeEntryMode::Submodule as i32,
         _ => TreeEntryMode::Unspecified as i32,
     }
 }
 
-fn entry_type_to_proto(entry_type: crate::git::trees::EntryType) -> i32 {
+const fn entry_type_to_proto(entry_type: crate::git::trees::EntryType) -> i32 {
     match entry_type {
-        crate::git::trees::EntryType::Blob => TreeEntryType::Blob as i32,
+        crate::git::trees::EntryType::Blob | crate::git::trees::EntryType::Link => {
+            TreeEntryType::Blob as i32 // Symlinks are blob-like
+        }
         crate::git::trees::EntryType::Tree => TreeEntryType::Tree as i32,
         crate::git::trees::EntryType::Commit => TreeEntryType::Commit as i32,
-        crate::git::trees::EntryType::Link => TreeEntryType::Blob as i32, // Symlinks are blob-like
     }
 }
 
-fn file_status_to_proto(status: crate::git::diff::FileStatus) -> i32 {
+const fn file_status_to_proto(status: crate::git::diff::FileStatus) -> i32 {
     match status {
         crate::git::diff::FileStatus::Added => DiffStatus::Added as i32,
         crate::git::diff::FileStatus::Deleted => DiffStatus::Deleted as i32,
@@ -828,7 +828,7 @@ fn file_status_to_proto(status: crate::git::diff::FileStatus) -> i32 {
     }
 }
 
-fn line_type_to_proto(line_type: crate::git::diff::LineType) -> i32 {
+const fn line_type_to_proto(line_type: crate::git::diff::LineType) -> i32 {
     match line_type {
         crate::git::diff::LineType::Context => DiffLineType::Context as i32,
         crate::git::diff::LineType::Addition => DiffLineType::Addition as i32,

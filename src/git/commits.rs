@@ -25,7 +25,7 @@ pub struct GitActor {
 }
 
 impl CommitService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 

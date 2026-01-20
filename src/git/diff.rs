@@ -80,7 +80,7 @@ pub struct DiffStats {
 }
 
 impl DiffService {
-    pub fn new(config: StorageConfig) -> Self {
+    pub const fn new(config: StorageConfig) -> Self {
         Self { config }
     }
 
@@ -197,29 +197,29 @@ impl DiffService {
                         old_oid: None,
                         new_oid: Some(id.to_string()),
                         old_mode: None,
-                        new_mode: Some(entry_mode.0 as u32),
+                        new_mode: Some(u32::from(entry_mode.0)),
                         status: FileStatus::Added,
                     },
                     Change::Deletion { location, entry_mode, id, .. } => DiffChangeInfo {
                         path: location.to_string(),
                         old_oid: Some(id.to_string()),
                         new_oid: None,
-                        old_mode: Some(entry_mode.0 as u32),
+                        old_mode: Some(u32::from(entry_mode.0)),
                         new_mode: None,
                         status: FileStatus::Deleted,
                     },
                     Change::Modification { location, previous_entry_mode, previous_id, entry_mode, id, .. } => {
-                        let status = if previous_entry_mode != entry_mode {
-                            FileStatus::TypeChanged
-                        } else {
+                        let status = if previous_entry_mode == entry_mode {
                             FileStatus::Modified
+                        } else {
+                            FileStatus::TypeChanged
                         };
                         DiffChangeInfo {
                             path: location.to_string(),
                             old_oid: Some(previous_id.to_string()),
                             new_oid: Some(id.to_string()),
-                            old_mode: Some(previous_entry_mode.0 as u32),
-                            new_mode: Some(entry_mode.0 as u32),
+                            old_mode: Some(u32::from(previous_entry_mode.0)),
+                            new_mode: Some(u32::from(entry_mode.0)),
                             status,
                         }
                     },
@@ -234,7 +234,7 @@ impl DiffService {
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
         let mut files = Vec::new();
-        let mut stats = DiffStats::default();
+        let mut diff_stats = DiffStats::default();
 
         for change in change_infos {
             let path = change.path;
@@ -242,7 +242,7 @@ impl DiffService {
             let new_oid = change.new_oid;
             let old_mode = change.old_mode;
             let new_mode = change.new_mode;
-            let status = change.status;
+            let file_status = change.status;
 
             // Apply path filter if specified
             if let Some(filter) = path_filter {
@@ -265,8 +265,8 @@ impl DiffService {
             for hunk in &hunks {
                 for line in &hunk.lines {
                     match line.line_type {
-                        LineType::Addition => stats.insertions += 1,
-                        LineType::Deletion => stats.deletions += 1,
+                        LineType::Addition => diff_stats.insertions += 1,
+                        LineType::Deletion => diff_stats.deletions += 1,
                         LineType::Context => {}
                     }
                 }
@@ -279,19 +279,19 @@ impl DiffService {
                 new_oid,
                 old_mode,
                 new_mode,
-                status,
+                status: file_status,
                 hunks,
                 is_binary,
             });
         }
 
-        stats.files_changed = files.len() as u32;
+        diff_stats.files_changed = files.len() as u32;
 
         Ok(DiffResult {
             old_oid: Some(old_tree.id().to_string()),
             new_oid: Some(new_tree.id().to_string()),
             files,
-            stats,
+            stats: diff_stats,
         })
     }
 
@@ -335,7 +335,7 @@ impl DiffService {
             let path = if base_path.is_empty() {
                 entry_name
             } else {
-                format!("{}/{}", base_path, entry_name)
+                format!("{base_path}/{entry_name}")
             };
 
             if entry.mode().is_tree() {
@@ -382,7 +382,7 @@ impl DiffService {
                     old_oid: None,
                     new_oid: Some(oid),
                     old_mode: None,
-                    new_mode: Some(entry.mode().0 as u32),
+                    new_mode: Some(u32::from(entry.mode().0)),
                     status: FileStatus::Added,
                     hunks,
                     is_binary,

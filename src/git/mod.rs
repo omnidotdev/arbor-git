@@ -47,13 +47,13 @@ pub enum GitError {
 
 impl From<gix::open::Error> for GitError {
     fn from(err: gix::open::Error) -> Self {
-        GitError::Gix(err.to_string())
+        Self::Gix(err.to_string())
     }
 }
 
 impl From<gix::reference::find::existing::Error> for GitError {
     fn from(err: gix::reference::find::existing::Error) -> Self {
-        GitError::Gix(err.to_string())
+        Self::Gix(err.to_string())
     }
 }
 
@@ -83,9 +83,7 @@ impl Default for StorageConfig {
 impl StorageConfig {
     pub fn from_env() -> Self {
         Self {
-            base_path: std::env::var("GIT_REPOS_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/var/lib/arbor/repos")),
+            base_path: std::env::var("GIT_REPOS_PATH").map_or_else(|_| PathBuf::from("/var/lib/arbor/repos"), PathBuf::from),
             max_repo_size: std::env::var("GIT_MAX_REPO_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -97,7 +95,7 @@ impl StorageConfig {
 
     /// Get the path for a repository
     pub fn repo_path(&self, owner: &str, name: &str) -> PathBuf {
-        self.base_path.join(owner).join(format!("{}.git", name))
+        self.base_path.join(owner).join(format!("{name}.git"))
     }
 }
 

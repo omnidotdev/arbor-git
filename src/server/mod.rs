@@ -133,10 +133,10 @@ async fn git_info_refs(
     Path((_owner, _repo)): Path<(String, String)>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let service = params.get("service").map(|s| s.as_str());
+    let service = params.get("service").map(std::string::String::as_str);
 
     match service {
-        Some("git-upload-pack") | Some("git-receive-pack") => {
+        Some("git-upload-pack" | "git-receive-pack") => {
             // TODO: Implement proper Git protocol response
             (
                 StatusCode::NOT_IMPLEMENTED,
