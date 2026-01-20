@@ -1,8 +1,8 @@
 [package]
 name = "arbor-git"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.84"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Omni <team@omni.dev>"]
 description = "High-performance Git backend service for Arbor"
 license = "MIT"
@@ -60,9 +60,6 @@ async-stream = "0.3"
 
 # Config
 dotenvy = "0.15"
-
-# Pin transitive dependency to version compatible with Rust 1.84
-home = "0.5.9"
 
 [build-dependencies]
 tonic-build = "0.13"
