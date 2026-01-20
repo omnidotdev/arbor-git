@@ -61,6 +61,9 @@ async-stream = "0.3"
 # Config
 dotenvy = "0.15"
 
+# Pin transitive dependency to version compatible with Rust 1.84
+home = "0.5.9"
+
 [build-dependencies]
 tonic-build = "0.13"
 
