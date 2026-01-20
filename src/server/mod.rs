@@ -75,9 +75,9 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
         // Git Smart HTTP endpoints (to be implemented)
-        .route("/:owner/:repo/info/refs", get(git_info_refs))
-        .route("/:owner/:repo/git-upload-pack", post(git_upload_pack))
-        .route("/:owner/:repo/git-receive-pack", post(git_receive_pack))
+        .route("/{owner}/{repo}/info/refs", get(git_info_refs))
+        .route("/{owner}/{repo}/git-upload-pack", post(git_upload_pack))
+        .route("/{owner}/{repo}/git-receive-pack", post(git_receive_pack))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
