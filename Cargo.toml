@@ -37,6 +37,9 @@ gix-transport = "0.46"
 gix-ref = "0.51"
 gix-traverse = "0.46"
 
+# Pin human_format to version without let-chains (which require nightly Rust)
+human_format = "=1.1.0"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -69,6 +69,7 @@ dependencies = [
  "gix-ref 0.51.0",
  "gix-transport 0.46.0",
  "gix-traverse 0.46.2",
+ "human_format",
  "hyper",
  "prost",
  "prost-types",
@@ -2199,9 +2200,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "human_format"
-version = "1.2.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaec953f16e5bcf6b8a3cb3aa959b17e5577dbd2693e94554c462c08be22624b"
+checksum = "5c3b1f728c459d27b12448862017b96ad4767b1ec2ec5e6434e99f1577f085b8"
 
 [[package]]
 name = "hyper"
