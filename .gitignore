@@ -1,0 +1,26 @@
+# Build artifacts
+/target/
+debug/
+*.pdb
+
+# Generated files
+/src/proto/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Data storage
+/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

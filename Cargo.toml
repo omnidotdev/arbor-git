@@ -1,0 +1,106 @@
+[package]
+name = "arbor-git"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Omni <team@omni.dev>"]
+description = "High-performance Git backend service for Arbor"
+license = "Apache-2.0"
+repository = "https://github.com/omnidotdev/arbor-git"
+homepage = "https://arbor.omni.dev"
+keywords = ["git", "gitoxide", "grpc", "backend"]
+categories = ["development-tools"]
+readme = "README.md"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+
+# HTTP server (for Git Smart HTTP protocol)
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+
+# Git - gitoxide
+gix = { version = "0.85", features = ["blocking-http-transport-reqwest-rust-tls"] }
+gix-hash = "0.25"
+gix-object = "0.62"
+gix-pack = "0.72"
+gix-protocol = "0.63"
+gix-transport = "0.57"
+gix-ref = "0.65"
+gix-traverse = "0.59"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database (for repository metadata)
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+
+# Streaming
+tokio-stream = "0.1"
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+futures = "0.3"
+async-stream = "0.3"
+
+# Config
+dotenvy = "0.15"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "arbor-git"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
+# Allow common pedantic lints that are too strict for this codebase
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+struct_field_names = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+self_only_used_in_recursion = "allow"
+unnecessary_wraps = "allow"
