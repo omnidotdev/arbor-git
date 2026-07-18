@@ -1,7 +1,7 @@
 <div align="center">
   <h1 align="center">arbor-git</h1>
 
-[Docs](https://docs.omni.dev/armory/arbor) | [Feedback](https://backfeed.omni.dev/workspaces/omni/projects/arbor) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev)
+[Docs](https://docs.omni.dev/armory/arbor) | [Feedback](https://backfeed.omni.dev/workspaces/omni/projects/arbor) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev) | [Threads](https://www.threads.com/@omnidotdev)
 
 </div>
 
