@@ -1,6 +1,6 @@
 use std::pin::Pin;
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -37,6 +37,7 @@ pub struct GitServiceImpl {
     tree_service: TreeService,
     diff_service: DiffService,
     ops_service: OperationsService,
+    config: StorageConfig,
 }
 
 impl GitServiceImpl {
@@ -47,9 +48,98 @@ impl GitServiceImpl {
             commit_service: CommitService::new(config.clone()),
             tree_service: TreeService::new(config.clone()),
             diff_service: DiffService::new(config.clone()),
-            ops_service: OperationsService::new(config),
+            ops_service: OperationsService::new(config.clone()),
+            config,
         }
     }
+}
+
+/// Run a git pack service (`upload-pack` or `receive-pack`) in stateless-RPC
+/// mode over a repository, wiring a channel of request chunks to the process's
+/// stdin and returning a channel of its stdout chunks. This is the same path a
+/// smart-HTTP git server uses; the gRPC layer is only a transport for the raw
+/// protocol bytes, so the real `git` implements the negotiation and packfile.
+fn run_git_pack(
+    service: &'static str,
+    repo_path: &std::path::Path,
+    mut stdin_rx: mpsc::Receiver<Vec<u8>>,
+) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    if !repo_path.exists() {
+        return Err(Status::not_found("repository not found"));
+    }
+
+    let mut child = tokio::process::Command::new("git")
+        .arg(service)
+        .arg("--stateless-rpc")
+        .arg(repo_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Status::internal(format!("failed to spawn git {service}: {e}")))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Status::internal("no stdin"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Status::internal("no stdout"))?;
+
+    // Forward request chunks to the process stdin, then close it (EOF)
+    tokio::spawn(async move {
+        while let Some(chunk) = stdin_rx.recv().await {
+            if stdin.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let _ = stdin.shutdown().await;
+    });
+
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, Status>>(16);
+
+    // Stream stdout back concurrently (draining it avoids a pipe-buffer deadlock
+    // with stdin), then surface a non-zero exit with its stderr
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                    return;
+                }
+            }
+        }
+
+        match child.wait().await {
+            Ok(status) if !status.success() => {
+                let mut err = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut err).await;
+                }
+                let _ = tx
+                    .send(Err(Status::internal(format!(
+                        "git {service} exited with {status}: {err}"
+                    ))))
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+            }
+            _ => {}
+        }
+    });
+
+    Ok(rx)
 }
 
 type StreamResult<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -842,25 +932,97 @@ impl git_service_server::GitService for GitServiceImpl {
     }
 
     // ========================================================================
-    // Pack Protocol (Stubs)
+    // Pack Protocol
     // ========================================================================
 
     type UploadPackStream = StreamResult<UploadPackResponse>;
 
+    #[instrument(skip(self, request))]
     async fn upload_pack(
         &self,
-        _request: Request<Streaming<UploadPackRequest>>,
+        request: Request<Streaming<UploadPackRequest>>,
     ) -> Result<Response<Self::UploadPackStream>, Status> {
-        Err(Status::unimplemented("upload_pack not yet implemented"))
+        use crate::proto::upload_pack_request::Request as Req;
+
+        let mut stream = request.into_inner();
+
+        // The first message carries the repository to serve
+        let init = stream
+            .message()
+            .await?
+            .and_then(|m| m.request)
+            .ok_or_else(|| Status::invalid_argument("missing init message"))?;
+        let repo = match init {
+            Req::Init(init) => init
+                .repository
+                .ok_or_else(|| Status::invalid_argument("missing repository"))?,
+            Req::Data(_) => {
+                return Err(Status::invalid_argument("first message must be init"));
+            }
+        };
+        let repo_path = self.config.repo_path(&repo.owner, &repo.name);
+
+        // Feed subsequent request chunks to git's stdin
+        let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(msg)) = stream.message().await {
+                let Some(Req::Data(bytes)) = msg.request else {
+                    continue;
+                };
+                if stdin_tx.send(bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out_rx = run_git_pack("upload-pack", &repo_path, stdin_rx)?;
+        let out =
+            ReceiverStream::new(out_rx).map(|chunk| chunk.map(|data| UploadPackResponse { data }));
+        Ok(Response::new(Box::pin(out)))
     }
 
     type ReceivePackStream = StreamResult<ReceivePackResponse>;
 
+    #[instrument(skip(self, request))]
     async fn receive_pack(
         &self,
-        _request: Request<Streaming<ReceivePackRequest>>,
+        request: Request<Streaming<ReceivePackRequest>>,
     ) -> Result<Response<Self::ReceivePackStream>, Status> {
-        Err(Status::unimplemented("receive_pack not yet implemented"))
+        use crate::proto::receive_pack_request::Request as Req;
+
+        let mut stream = request.into_inner();
+
+        let init = stream
+            .message()
+            .await?
+            .and_then(|m| m.request)
+            .ok_or_else(|| Status::invalid_argument("missing init message"))?;
+        let repo = match init {
+            Req::Init(init) => init
+                .repository
+                .ok_or_else(|| Status::invalid_argument("missing repository"))?,
+            Req::Data(_) => {
+                return Err(Status::invalid_argument("first message must be init"));
+            }
+        };
+        let repo_path = self.config.repo_path(&repo.owner, &repo.name);
+
+        let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(16);
+        tokio::spawn(async move {
+            while let Ok(Some(msg)) = stream.message().await {
+                let Some(Req::Data(bytes)) = msg.request else {
+                    continue;
+                };
+                if stdin_tx.send(bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out_rx = run_git_pack("receive-pack", &repo_path, stdin_rx)?;
+        let out =
+            ReceiverStream::new(out_rx).map(|chunk| chunk.map(|data| ReceivePackResponse { data }));
+        Ok(Response::new(Box::pin(out)))
     }
 
     // ========================================================================
@@ -952,5 +1114,97 @@ const fn line_type_to_proto(line_type: crate::git::diff::LineType) -> i32 {
         crate::git::diff::LineType::Context => DiffLineType::Context as i32,
         crate::git::diff::LineType::Addition => DiffLineType::Addition as i32,
         crate::git::diff::LineType::Deletion => DiffLineType::Deletion as i32,
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::tempdir;
+
+    /// A git pkt-line: a 4-hex length prefix (counting itself) then the payload.
+    fn pkt_line(s: &str) -> Vec<u8> {
+        let mut v = format!("{:04x}", s.len() + 4).into_bytes();
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    fn git(args: &[&str], cwd: &std::path::Path) {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn upload_pack_serves_a_real_fetch() {
+        let storage = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: storage.path().to_path_buf(),
+            ..Default::default()
+        };
+        RepositoryService::new(config.clone())
+            .init("owner", "repo", Some("main"))
+            .unwrap();
+        let bare = config.repo_path("owner", "repo");
+
+        // Create a commit in a work tree and push it into the bare repository
+        let work = tempdir().unwrap();
+        git(&["init", "-q", "-b", "main", "."], work.path());
+        std::fs::write(work.path().join("f.txt"), "hi").unwrap();
+        git(&["add", "."], work.path());
+        git(&["commit", "-q", "-m", "c"], work.path());
+        git(
+            &["push", "-q", bare.to_str().unwrap(), "main:main"],
+            work.path(),
+        );
+
+        let out = StdCommand::new("git")
+            .args([
+                "--git-dir",
+                bare.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/main",
+            ])
+            .output()
+            .unwrap();
+        let oid = String::from_utf8(out.stdout).unwrap().trim().to_string();
+
+        // A minimal clone request; no side-band, so the packfile is raw in stdout
+        let mut req = pkt_line(&format!(
+            "want {oid} multi_ack ofs-delta agent=arbor-git-test\n"
+        ));
+        req.extend_from_slice(b"0000");
+        req.extend(pkt_line("done\n"));
+
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(req).await.unwrap();
+        drop(tx);
+
+        let mut out_rx = run_git_pack("upload-pack", &bare, rx).unwrap();
+        let mut response = Vec::new();
+        while let Some(chunk) = out_rx.recv().await {
+            response.extend(chunk.expect("chunk"));
+        }
+
+        assert!(
+            response.windows(4).any(|w| w == b"PACK"),
+            "upload-pack response should contain a packfile"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_pack_rejects_a_missing_repository() {
+        let storage = tempdir().unwrap();
+        let (_tx, rx) = mpsc::channel(1);
+        let result = run_git_pack("upload-pack", &storage.path().join("nope.git"), rx);
+        assert!(result.is_err());
     }
 }
