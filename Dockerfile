@@ -32,9 +32,10 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies. git is required: upload-pack / receive-pack are
+# served by spawning the real git binary in stateless-RPC mode.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates git && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
