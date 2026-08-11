@@ -318,6 +318,7 @@ message DiffEntry {
   string new_oid = 5;
   uint32 additions = 6;
   uint32 deletions = 7;
+  bool is_binary = 8;
 }
 
 enum DiffStatus {
