@@ -97,32 +97,37 @@ impl DiffService {
     ) -> Result<DiffResult> {
         let repo = open_repo_by_name(&self.config, owner, name)?;
 
-        // Resolve refs to commits
-        let old_id = repo
-            .rev_parse_single(old_ref)
-            .map_err(|_| GitError::RefNotFound {
-                reference: old_ref.to_string(),
-            })?;
-
         let new_id = repo
             .rev_parse_single(new_ref)
             .map_err(|_| GitError::RefNotFound {
                 reference: new_ref.to_string(),
             })?;
 
-        let old_commit = repo
-            .find_commit(old_id)
-            .map_err(|e| GitError::Gix(e.to_string()))?;
-
         let new_commit = repo
             .find_commit(new_id)
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
-        let old_tree = old_commit
+        let new_tree = new_commit
             .tree()
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
-        let new_tree = new_commit
+        // An empty base ref means "diff against the empty tree" (a root commit,
+        // or the initial state), so every file appears as an addition
+        if old_ref.is_empty() {
+            return self.diff_initial_commit(&repo, &new_tree, path_filter, context_lines);
+        }
+
+        let old_id = repo
+            .rev_parse_single(old_ref)
+            .map_err(|_| GitError::RefNotFound {
+                reference: old_ref.to_string(),
+            })?;
+
+        let old_commit = repo
+            .find_commit(old_id)
+            .map_err(|e| GitError::Gix(e.to_string()))?;
+
+        let old_tree = old_commit
             .tree()
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
