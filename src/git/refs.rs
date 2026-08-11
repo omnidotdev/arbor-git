@@ -213,6 +213,28 @@ impl RefService {
         Ok(true)
     }
 
+    /// Point HEAD at a branch, making it the repository's default branch.
+    ///
+    /// The branch must already exist. HEAD is written as a symbolic ref
+    /// (`ref: refs/heads/<branch>`), the same on-disk form git uses, so a fresh
+    /// clone checks out the new default.
+    #[instrument(skip(self))]
+    pub fn set_default_branch(&self, owner: &str, name: &str, branch: &str) -> Result<()> {
+        let repo = open_repo_by_name(&self.config, owner, name)?;
+
+        let ref_name = format!("refs/heads/{branch}");
+        repo.find_reference(&ref_name)
+            .map_err(|_| GitError::RefNotFound {
+                reference: branch.to_string(),
+            })?;
+
+        let head_path = self.config.repo_path(owner, name).join("HEAD");
+        std::fs::write(&head_path, format!("ref: {ref_name}\n"))
+            .map_err(|e| GitError::Gix(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Create a new tag
     #[instrument(skip(self))]
     pub fn create_tag(
