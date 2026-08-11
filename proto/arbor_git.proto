@@ -44,6 +44,7 @@ service GitService {
   rpc CherryPick(CherryPickRequest) returns (CherryPickResponse);
 
   // Pack operations (for Smart HTTP protocol)
+  rpc AdvertiseRefs(AdvertiseRefsRequest) returns (AdvertiseRefsResponse);
   rpc UploadPack(stream UploadPackRequest) returns (stream UploadPackResponse);
   rpc ReceivePack(stream ReceivePackRequest) returns (stream ReceivePackResponse);
 
@@ -449,6 +450,16 @@ message CherryPickResponse {
 // ============================================================================
 // Pack Protocol (Smart HTTP)
 // ============================================================================
+
+message AdvertiseRefsRequest {
+  RepositoryPath repository = 1;
+  // "upload-pack" (fetch/clone) or "receive-pack" (push)
+  string service = 2;
+}
+
+message AdvertiseRefsResponse {
+  bytes data = 1;
+}
 
 message UploadPackRequest {
   oneof request {

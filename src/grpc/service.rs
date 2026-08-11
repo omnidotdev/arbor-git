@@ -16,16 +16,16 @@ use crate::git::{
     trees::TreeService,
 };
 use crate::proto::{
-    BlobChunk, BlobInfo, CheckObjectsExistRequest, CheckObjectsExistResponse, CherryPickRequest,
-    CherryPickResponse, Commit, CreateBranchRequest, CreateBranchResponse, CreateTagRequest,
-    CreateTagResponse, DeleteBranchRequest, DeleteBranchResponse, DeleteRepositoryRequest,
-    DeleteRepositoryResponse, DeleteTagRequest, DeleteTagResponse, DiffEntry, DiffLineType,
-    DiffStatus, FileDiff, GetBlobInfoRequest, GetBlobRequest, GetCommitAncestorsRequest,
-    GetCommitLogRequest, GetCommitRequest, GetDiffRequest, GetFileDiffRequest,
-    GetRepositoryInfoRequest, GetTreeRequest, GetTreeResponse, GitSignature, InitRepositoryRequest,
-    InitRepositoryResponse, ListRefsRequest, ListRefsResponse, MergeChangeRequest,
-    MergeChangeResponse, MergeRequest, MergeResponse, RebaseRequest, RebaseResponse,
-    ReceivePackRequest, ReceivePackResponse, Ref, RefType, RenameRepositoryRequest,
+    AdvertiseRefsRequest, AdvertiseRefsResponse, BlobChunk, BlobInfo, CheckObjectsExistRequest,
+    CheckObjectsExistResponse, CherryPickRequest, CherryPickResponse, Commit, CreateBranchRequest,
+    CreateBranchResponse, CreateTagRequest, CreateTagResponse, DeleteBranchRequest,
+    DeleteBranchResponse, DeleteRepositoryRequest, DeleteRepositoryResponse, DeleteTagRequest,
+    DeleteTagResponse, DiffEntry, DiffLineType, DiffStatus, FileDiff, GetBlobInfoRequest,
+    GetBlobRequest, GetCommitAncestorsRequest, GetCommitLogRequest, GetCommitRequest,
+    GetDiffRequest, GetFileDiffRequest, GetRepositoryInfoRequest, GetTreeRequest, GetTreeResponse,
+    GitSignature, InitRepositoryRequest, InitRepositoryResponse, ListRefsRequest, ListRefsResponse,
+    MergeChangeRequest, MergeChangeResponse, MergeRequest, MergeResponse, RebaseRequest,
+    RebaseResponse, ReceivePackRequest, ReceivePackResponse, Ref, RefType, RenameRepositoryRequest,
     RenameRepositoryResponse, RepositoryExistsRequest, RepositoryExistsResponse, RepositoryInfo,
     RepositoryPath, ResolveRefRequest, ResolveRefResponse, SetDefaultBranchRequest,
     SetDefaultBranchResponse, TreeEntry, TreeEntryMode, TreeEntryType, UploadPackRequest,
@@ -142,6 +142,42 @@ fn run_git_pack(
     });
 
     Ok(rx)
+}
+
+/// Produce a git Smart-HTTP ref advertisement for a repository, the bytes a
+/// client fetches from `GET /info/refs?service=git-<service>` before negotiating.
+/// Runs `git <service> --stateless-rpc --advertise-refs` under protocol v2 (the
+/// same env the in-process path used), so the output is byte-compatible; the
+/// caller prepends the `# service=` announcement. `service` is `upload-pack`
+/// (fetch/clone) or `receive-pack` (push).
+async fn run_advertise_refs(repo_path: &std::path::Path, service: &str) -> Result<Vec<u8>, Status> {
+    if !matches!(service, "upload-pack" | "receive-pack") {
+        return Err(Status::invalid_argument(
+            "service must be upload-pack or receive-pack",
+        ));
+    }
+    if !repo_path.exists() {
+        return Err(Status::not_found("repository not found"));
+    }
+
+    let out = tokio::process::Command::new("git")
+        .arg(service)
+        .arg("--stateless-rpc")
+        .arg("--advertise-refs")
+        .arg(repo_path)
+        .env("GIT_PROTOCOL", "version=2")
+        .output()
+        .await
+        .map_err(|e| Status::internal(format!("failed to spawn git {service}: {e}")))?;
+
+    if !out.status.success() {
+        return Err(Status::internal(format!(
+            "git {service} --advertise-refs failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+
+    Ok(out.stdout)
 }
 
 /// Run a git plumbing command in a bare repository and return its output.
@@ -1114,6 +1150,20 @@ impl git_service_server::GitService for GitServiceImpl {
     // Pack Protocol
     // ========================================================================
 
+    #[instrument(skip(self, request))]
+    async fn advertise_refs(
+        &self,
+        request: Request<AdvertiseRefsRequest>,
+    ) -> Result<Response<AdvertiseRefsResponse>, Status> {
+        let req = request.into_inner();
+        let repo = req
+            .repository
+            .ok_or_else(|| Status::invalid_argument("missing repository"))?;
+        let repo_path = self.config.repo_path(&repo.owner, &repo.name);
+        let data = run_advertise_refs(&repo_path, &req.service).await?;
+        Ok(Response::new(AdvertiseRefsResponse { data }))
+    }
+
     type UploadPackStream = StreamResult<UploadPackResponse>;
 
     #[instrument(skip(self, request))]
@@ -1385,6 +1435,69 @@ mod pack_tests {
         let (_tx, rx) = mpsc::channel(1);
         let result = run_git_pack("upload-pack", &storage.path().join("nope.git"), rx);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn advertise_refs_advertises_the_repositorys_refs() {
+        let storage = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: storage.path().to_path_buf(),
+            ..Default::default()
+        };
+        RepositoryService::new(config.clone())
+            .init("owner", "repo", Some("main"))
+            .unwrap();
+        let bare = config.repo_path("owner", "repo");
+
+        // Seed a commit so there is a ref to advertise
+        let work = tempdir().unwrap();
+        git(&["init", "-q", "-b", "main", "."], work.path());
+        std::fs::write(work.path().join("f.txt"), "hi").unwrap();
+        git(&["add", "."], work.path());
+        git(&["commit", "-q", "-m", "c"], work.path());
+        git(
+            &["push", "-q", bare.to_str().unwrap(), "main:main"],
+            work.path(),
+        );
+
+        // receive-pack has no protocol v2, so its advertisement lists refs inline:
+        // the branch name proves the pipe carried a real advertisement
+        let recv = run_advertise_refs(&bare, "receive-pack").await.unwrap();
+        let recv = String::from_utf8_lossy(&recv);
+        assert!(
+            recv.contains("refs/heads/main"),
+            "receive-pack advertisement should list main: {recv}"
+        );
+
+        // upload-pack advertises under protocol v2 (capabilities, not inline refs);
+        // a non-empty body is a valid advertisement the client can negotiate against
+        let up = run_advertise_refs(&bare, "upload-pack").await.unwrap();
+        assert!(
+            !up.is_empty(),
+            "upload-pack advertisement should be non-empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn advertise_refs_rejects_bad_input() {
+        let storage = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: storage.path().to_path_buf(),
+            ..Default::default()
+        };
+        RepositoryService::new(config.clone())
+            .init("owner", "repo", Some("main"))
+            .unwrap();
+        let bare = config.repo_path("owner", "repo");
+
+        // an unknown service is refused, not spawned
+        assert!(run_advertise_refs(&bare, "frob-pack").await.is_err());
+        // a missing repository is a not-found, not a hang
+        assert!(
+            run_advertise_refs(&storage.path().join("nope.git"), "upload-pack")
+                .await
+                .is_err()
+        );
     }
 }
 
