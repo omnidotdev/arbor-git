@@ -1,8 +1,10 @@
 pub mod commits;
 pub mod diff;
+pub mod hook;
 pub mod operations;
 pub mod refs;
 pub mod repository;
+pub mod scope_match;
 pub mod trees;
 
 pub use commits::CommitService;
@@ -97,6 +99,29 @@ impl StorageConfig {
     /// Get the path for a repository
     pub fn repo_path(&self, owner: &str, name: &str) -> PathBuf {
         self.base_path.join(owner).join(format!("{name}.git"))
+    }
+
+    /// Directory holding the pre-receive credential-boundary hook. Kept outside
+    /// the per-owner repository tree (owners are usernames, never `.arbor-hooks`).
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.base_path.join(".arbor-hooks")
+    }
+
+    /// Write the pre-receive hook that re-invokes this binary as the push
+    /// credential boundary, and return its directory. Idempotent; called at boot.
+    /// The script execs `$ARBOR_GIT_BIN __pre-receive`, which git runs before
+    /// applying any ref update on a confined push (see the `receive_pack` handler).
+    pub fn ensure_pre_receive_hook(&self) -> std::io::Result<PathBuf> {
+        let dir = self.hooks_dir();
+        std::fs::create_dir_all(&dir)?;
+        let hook = dir.join("pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nexec \"$ARBOR_GIT_BIN\" __pre-receive\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(dir)
     }
 }
 

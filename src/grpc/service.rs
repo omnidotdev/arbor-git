@@ -64,18 +64,70 @@ impl GitServiceImpl {
 fn run_git_pack(
     service: &'static str,
     repo_path: &std::path::Path,
-    mut stdin_rx: mpsc::Receiver<Vec<u8>>,
+    stdin_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     if !repo_path.exists() {
         return Err(Status::not_found("repository not found"));
     }
 
-    let mut child = tokio::process::Command::new("git")
-        .arg(service)
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg(service).arg("--stateless-rpc").arg(repo_path);
+    spawn_and_stream(cmd, service, stdin_rx)
+}
+
+/// Run `receive-pack` for a confined push: point `core.hooksPath` at the
+/// pre-receive credential boundary (via `-c`, the only form git honors here) and
+/// pass the token's ref/path patterns to it as JSON env, so the hook enforces the
+/// bounds against the actual pushed objects. `None` patterns leave that dimension
+/// unconfined; `Some` (even empty) confines it. Unconfined pushes never reach
+/// here (they use `run_git_pack` directly), so this path is byte-for-byte the
+/// same as an unconfined push plus the hook.
+fn run_confined_receive_pack(
+    repo_path: &std::path::Path,
+    hooks_dir: &std::path::Path,
+    bin_path: &std::path::Path,
+    ref_patterns: Option<Vec<String>>,
+    path_patterns: Option<Vec<String>>,
+    stdin_rx: mpsc::Receiver<Vec<u8>>,
+) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
+    if !repo_path.exists() {
+        return Err(Status::not_found("repository not found"));
+    }
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("-c")
+        .arg(format!("core.hooksPath={}", hooks_dir.display()))
+        .arg("receive-pack")
         .arg("--stateless-rpc")
         .arg(repo_path)
+        .env("ARBOR_GIT_BIN", bin_path);
+    if let Some(patterns) = ref_patterns {
+        cmd.env(
+            "ARBOR_REF_PATTERNS",
+            serde_json::to_string(&patterns).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+    if let Some(patterns) = path_patterns {
+        cmd.env(
+            "ARBOR_PATH_PATTERNS",
+            serde_json::to_string(&patterns).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+    spawn_and_stream(cmd, "receive-pack", stdin_rx)
+}
+
+/// Spawn a prepared git pack command and bridge its stdio to channels: feed the
+/// request chunks to stdin, stream stdout back, and surface a non-zero exit with
+/// its stderr. Shared by the plain and confined runners so the transport is
+/// identical.
+fn spawn_and_stream(
+    mut cmd: tokio::process::Command,
+    service: &'static str,
+    mut stdin_rx: mpsc::Receiver<Vec<u8>>,
+) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1226,15 +1278,21 @@ impl git_service_server::GitService for GitServiceImpl {
             .await?
             .and_then(|m| m.request)
             .ok_or_else(|| Status::invalid_argument("missing init message"))?;
-        let repo = match init {
-            Req::Init(init) => init
-                .repository
-                .ok_or_else(|| Status::invalid_argument("missing repository"))?,
+        let init = match init {
+            Req::Init(init) => init,
             Req::Data(_) => {
                 return Err(Status::invalid_argument("first message must be init"));
             }
         };
+        let repo = init
+            .repository
+            .ok_or_else(|| Status::invalid_argument("missing repository"))?;
         let repo_path = self.config.repo_path(&repo.owner, &repo.name);
+
+        // A `*_confined` dimension carries its patterns; leave the other unconfined
+        let ref_patterns = init.ref_confined.then_some(init.ref_patterns);
+        let path_patterns = init.path_confined.then_some(init.path_patterns);
+        let confined = init.ref_confined || init.path_confined;
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(16);
         tokio::spawn(async move {
@@ -1248,7 +1306,26 @@ impl git_service_server::GitService for GitServiceImpl {
             }
         });
 
-        let out_rx = run_git_pack("receive-pack", &repo_path, stdin_rx)?;
+        let out_rx = if confined {
+            // Enforce the token's ref/path bounds against the actual pushed objects
+            // via the pre-receive boundary hook (see git::hook)
+            let hooks_dir = self
+                .config
+                .ensure_pre_receive_hook()
+                .map_err(|e| Status::internal(format!("failed to install hook: {e}")))?;
+            let bin = std::env::current_exe()
+                .map_err(|e| Status::internal(format!("cannot locate binary: {e}")))?;
+            run_confined_receive_pack(
+                &repo_path,
+                &hooks_dir,
+                &bin,
+                ref_patterns,
+                path_patterns,
+                stdin_rx,
+            )?
+        } else {
+            run_git_pack("receive-pack", &repo_path, stdin_rx)?
+        };
         let out =
             ReceiverStream::new(out_rx).map(|chunk| chunk.map(|data| ReceivePackResponse { data }));
         Ok(Response::new(Box::pin(out)))

@@ -486,6 +486,13 @@ message ReceivePackRequest {
 message ReceivePackInit {
   RepositoryPath repository = 1;
   string user_id = 2;        // For authorization
+  // Credential ref/path confinement enforced by the pre-receive boundary. A
+  // `*_confined=false` dimension is unconfined (every ref / every path);
+  // `true` with an empty pattern list fails closed (matches nothing).
+  bool ref_confined = 3;
+  repeated string ref_patterns = 4;
+  bool path_confined = 5;
+  repeated string path_patterns = 6;
 }
 
 message ReceivePackResponse {
