@@ -75,19 +75,20 @@ fn run_git_pack(
     spawn_and_stream(cmd, service, stdin_rx)
 }
 
-/// Run `receive-pack` for a confined push: point `core.hooksPath` at the
-/// pre-receive credential boundary (via `-c`, the only form git honors here) and
-/// pass the token's ref/path patterns to it as JSON env, so the hook enforces the
-/// bounds against the actual pushed objects. `None` patterns leave that dimension
-/// unconfined; `Some` (even empty) confines it. Unconfined pushes never reach
-/// here (they use `run_git_pack` directly), so this path is byte-for-byte the
-/// same as an unconfined push plus the hook.
-fn run_confined_receive_pack(
+/// Run `receive-pack` through the pre-receive boundary hook: point
+/// `core.hooksPath` at it (via `-c`, the only form git honors here) and pass the
+/// token's ref/path patterns and the repository's protected-branch patterns as
+/// JSON env, so the hook enforces both against the actual pushed objects. `None`
+/// ref/path patterns leave that dimension unconfined; `Some` (even empty) confines
+/// it. Pushes with nothing to enforce use `run_git_pack` directly, so this path is
+/// byte-for-byte the same as an unenforced push plus the hook.
+fn run_enforced_receive_pack(
     repo_path: &std::path::Path,
     hooks_dir: &std::path::Path,
     bin_path: &std::path::Path,
     ref_patterns: Option<Vec<String>>,
     path_patterns: Option<Vec<String>>,
+    protected_ref_patterns: &[String],
     stdin_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
     if !repo_path.exists() {
@@ -111,6 +112,12 @@ fn run_confined_receive_pack(
         cmd.env(
             "ARBOR_PATH_PATTERNS",
             serde_json::to_string(&patterns).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+    if !protected_ref_patterns.is_empty() {
+        cmd.env(
+            "ARBOR_PROTECTED_REF_PATTERNS",
+            serde_json::to_string(protected_ref_patterns).unwrap_or_else(|_| "[]".to_string()),
         );
     }
     spawn_and_stream(cmd, "receive-pack", stdin_rx)
@@ -1296,7 +1303,11 @@ impl git_service_server::GitService for GitServiceImpl {
         // A `*_confined` dimension carries its patterns; leave the other unconfined
         let ref_patterns = init.ref_confined.then_some(init.ref_patterns);
         let path_patterns = init.path_confined.then_some(init.path_patterns);
-        let confined = init.ref_confined || init.path_confined;
+        let protected_ref_patterns = init.protected_ref_patterns;
+        // The hook runs whenever there is anything for it to enforce: a confined
+        // token, or a repository with protected branches (which applies to every
+        // pusher, not just confined tokens)
+        let enforce = init.ref_confined || init.path_confined || !protected_ref_patterns.is_empty();
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(16);
         tokio::spawn(async move {
@@ -1310,21 +1321,23 @@ impl git_service_server::GitService for GitServiceImpl {
             }
         });
 
-        let out_rx = if confined {
-            // Enforce the token's ref/path bounds against the actual pushed objects
-            // via the pre-receive boundary hook (see git::hook)
+        let out_rx = if enforce {
+            // Enforce the token's ref/path bounds and the repository's branch
+            // protection against the actual pushed objects via the pre-receive
+            // boundary hook (see git::hook)
             let hooks_dir = self
                 .config
                 .ensure_pre_receive_hook()
                 .map_err(|e| Status::internal(format!("failed to install hook: {e}")))?;
             let bin = std::env::current_exe()
                 .map_err(|e| Status::internal(format!("cannot locate binary: {e}")))?;
-            run_confined_receive_pack(
+            run_enforced_receive_pack(
                 &repo_path,
                 &hooks_dir,
                 &bin,
                 ref_patterns,
                 path_patterns,
+                &protected_ref_patterns,
                 stdin_rx,
             )?
         } else {

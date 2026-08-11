@@ -15,7 +15,7 @@
 use std::io::Read;
 use std::process::Command;
 
-use super::scope_match::{RefUpdate, ScopeBounds, evaluate_receive_pack};
+use super::scope_match::{RefUpdate, ScopeBounds, evaluate_receive_pack, matches_glob};
 
 /// Parse an injected pattern env var: absent means unconfined (`None`); present
 /// means confined to the JSON list (a parse failure fails closed to an empty
@@ -28,6 +28,36 @@ fn parse_patterns(var: &str) -> Option<Vec<String>> {
 /// A ref update whose new OID is all zeroes is a deletion (nothing to diff).
 fn is_zero_oid(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|b| b == b'0')
+}
+
+/// Whether a ref names a protected branch: only `refs/heads/*` refs are subject
+/// to branch protection (tags and other refs never are), matched against the
+/// rule globs by branch name.
+fn is_protected(protected: &[String], reference: &str) -> bool {
+    let Some(branch) = reference.strip_prefix("refs/heads/") else {
+        return false;
+    };
+    protected
+        .iter()
+        .any(|pattern| matches_glob(pattern, branch))
+}
+
+/// Whether advancing `old` to `new` rewrites history (a force / non-fast-forward
+/// push): true when `old` is NOT an ancestor of `new`. `git merge-base
+/// --is-ancestor` exits 0 when it is (a fast-forward, allowed), 1 when it is not.
+fn is_force_push(old: &str, new: &str) -> Result<bool, String> {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", old, new])
+        .output()
+        .map_err(|e| format!("git merge-base failed: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "git merge-base failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )),
+    }
 }
 
 /// The repo-relative paths a push introduces: the union of file changes across
@@ -81,9 +111,11 @@ fn changed_paths_for(new_oid: &str) -> Result<Vec<String>, String> {
 
 /// Run the pre-receive boundary against the updates on stdin, returning the exit
 /// code git should use (0 allow, 1 reject). Split from `run` so it is testable.
-pub fn evaluate(bounds: &ScopeBounds, input: &str) -> Result<i32, String> {
-    // Unconfined in both dimensions: nothing for the boundary to enforce
-    if bounds.ref_patterns.is_none() && bounds.path_patterns.is_none() {
+pub fn evaluate(bounds: &ScopeBounds, protected: &[String], input: &str) -> Result<i32, String> {
+    let confined = bounds.ref_patterns.is_some() || bounds.path_patterns.is_some();
+
+    // Nothing to enforce: no token confinement and no protected branches
+    if !confined && protected.is_empty() {
         return Ok(0);
     }
 
@@ -92,15 +124,31 @@ pub fn evaluate(bounds: &ScopeBounds, input: &str) -> Result<i32, String> {
     let need_paths = bounds.path_patterns.is_some();
 
     let mut updates = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
+
     for line in input.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let mut parts = line.split(' ');
-        let _old = parts.next().unwrap_or("");
+        let old = parts.next().unwrap_or("");
         let new = parts.next().unwrap_or("");
         let reference = parts.next().unwrap_or("").to_string();
+
+        // Branch protection applies to EVERY pusher (not just confined tokens): a
+        // protected branch cannot be deleted or force-pushed
+        if is_protected(protected, &reference) {
+            if is_zero_oid(new) {
+                reasons.push(format!(
+                    "{reference} is a protected branch and cannot be deleted"
+                ));
+            } else if !is_zero_oid(old) && is_force_push(old, new)? {
+                reasons.push(format!(
+                    "{reference} is a protected branch and cannot be force-pushed"
+                ));
+            }
+        }
 
         let changed_paths = if need_paths && !is_zero_oid(new) {
             changed_paths_for(new)?
@@ -114,12 +162,16 @@ pub fn evaluate(bounds: &ScopeBounds, input: &str) -> Result<i32, String> {
         });
     }
 
-    let rejections = evaluate_receive_pack(bounds, &updates);
-    if rejections.is_empty() {
+    // Token ref/path confinement (no-op when unconfined)
+    for rejection in evaluate_receive_pack(bounds, &updates) {
+        reasons.push(rejection.reason);
+    }
+
+    if reasons.is_empty() {
         return Ok(0);
     }
-    for rejection in &rejections {
-        eprintln!("arbor: {}", rejection.reason);
+    for reason in &reasons {
+        eprintln!("arbor: {reason}");
     }
     Ok(1)
 }
@@ -131,6 +183,7 @@ pub fn run_pre_receive() -> i32 {
         ref_patterns: parse_patterns("ARBOR_REF_PATTERNS"),
         path_patterns: parse_patterns("ARBOR_PATH_PATTERNS"),
     };
+    let protected = parse_patterns("ARBOR_PROTECTED_REF_PATTERNS").unwrap_or_default();
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
@@ -138,7 +191,7 @@ pub fn run_pre_receive() -> i32 {
         return 1;
     }
 
-    match evaluate(&bounds, &input) {
+    match evaluate(&bounds, &protected, &input) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("arbor: {message}");
@@ -160,9 +213,9 @@ mod tests {
 
     #[test]
     fn unconfined_allows_without_touching_git() {
-        // no git repo in cwd, but unconfined bounds short-circuit before any walk
+        // no git repo in cwd, but unconfined + unprotected short-circuits any walk
         let input = "0000000000000000000000000000000000000000 abc123 refs/heads/main\n";
-        assert_eq!(evaluate(&bounds(None, None), input).unwrap(), 0);
+        assert_eq!(evaluate(&bounds(None, None), &[], input).unwrap(), 0);
     }
 
     #[test]
@@ -170,7 +223,7 @@ mod tests {
         let input = "old new refs/heads/main\n";
         // ref-only confinement judges without needing changed paths (no git walk)
         assert_eq!(
-            evaluate(&bounds(Some(&["refs/heads/agent/*"]), None), input).unwrap(),
+            evaluate(&bounds(Some(&["refs/heads/agent/*"]), None), &[], input).unwrap(),
             1
         );
     }
@@ -179,7 +232,7 @@ mod tests {
     fn an_in_bounds_ref_is_allowed_when_only_refs_are_confined() {
         let input = "old new refs/heads/agent/feature\n";
         assert_eq!(
-            evaluate(&bounds(Some(&["refs/heads/agent/*"]), None), input).unwrap(),
+            evaluate(&bounds(Some(&["refs/heads/agent/*"]), None), &[], input).unwrap(),
             0
         );
     }
@@ -191,9 +244,37 @@ mod tests {
         assert_eq!(
             evaluate(
                 &bounds(Some(&["refs/heads/agent/*"]), Some(&["src/**"])),
+                &[],
                 input
             )
             .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_protected_branch_cannot_be_deleted() {
+        // deletion of a protected branch is rejected with no git access needed
+        let input = "abc 0000000000000000000000000000000000000000 refs/heads/main\n";
+        assert_eq!(
+            evaluate(&bounds(None, None), &["main".to_string()], input).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn protection_ignores_tags_and_unprotected_branches() {
+        // a tag is never a protected branch, even under a `**` rule
+        let tag = "abc 0000000000000000000000000000000000000000 refs/tags/v1\n";
+        assert_eq!(
+            evaluate(&bounds(None, None), &["**".to_string()], tag).unwrap(),
+            0
+        );
+        // a branch that matches no rule is unprotected (no git walk since it is
+        // not deleted and not protected)
+        let other = "old new refs/heads/feature\n";
+        assert_eq!(
+            evaluate(&bounds(None, None), &["main".to_string()], other).unwrap(),
             0
         );
     }

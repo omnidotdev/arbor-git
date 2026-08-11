@@ -493,6 +493,9 @@ message ReceivePackInit {
   repeated string ref_patterns = 4;
   bool path_confined = 5;
   repeated string path_patterns = 6;
+  // Branch globs protected by repository policy (no delete / no force-push),
+  // enforced for every pusher regardless of token confinement.
+  repeated string protected_ref_patterns = 7;
 }
 
 message ReceivePackResponse {
