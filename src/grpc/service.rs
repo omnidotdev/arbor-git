@@ -26,8 +26,9 @@ use crate::proto::{
     InitRepositoryResponse, ListRefsRequest, ListRefsResponse, MergeRequest, MergeResponse,
     RebaseRequest, RebaseResponse, ReceivePackRequest, ReceivePackResponse, Ref, RefType,
     RepositoryExistsRequest, RepositoryExistsResponse, RepositoryInfo, RepositoryPath,
-    ResolveRefRequest, ResolveRefResponse, TreeEntry, TreeEntryMode, TreeEntryType,
-    UploadPackRequest, UploadPackResponse, git_service_server,
+    ResolveRefRequest, ResolveRefResponse, SetDefaultBranchRequest, SetDefaultBranchResponse,
+    TreeEntry, TreeEntryMode, TreeEntryType, UploadPackRequest, UploadPackResponse,
+    git_service_server,
 };
 
 pub struct GitServiceImpl {
@@ -355,6 +356,25 @@ impl git_service_server::GitService for GitServiceImpl {
             .delete_branch(&repo.owner, &repo.name, &req.name, req.force)
         {
             Ok(deleted) => Ok(Response::new(DeleteBranchResponse { deleted })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    #[instrument(skip(self))]
+    async fn set_default_branch(
+        &self,
+        request: Request<SetDefaultBranchRequest>,
+    ) -> Result<Response<SetDefaultBranchResponse>, Status> {
+        let req = request.into_inner();
+        let repo = req
+            .repository
+            .ok_or_else(|| Status::invalid_argument("repository required"))?;
+
+        match self
+            .ref_service
+            .set_default_branch(&repo.owner, &repo.name, &req.branch)
+        {
+            Ok(()) => Ok(Response::new(SetDefaultBranchResponse { success: true })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
