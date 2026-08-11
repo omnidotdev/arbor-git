@@ -52,6 +52,30 @@ impl RepositoryService {
 
     /// Delete a repository
     #[instrument(skip(self))]
+    /// Rename a repository within an owner by moving its bare directory.
+    ///
+    /// Guarded: a no-op when the name is unchanged, and refused (Ok(false)) when
+    /// the source is missing or the target already exists, so a rename never
+    /// clobbers another repository.
+    pub fn rename(&self, owner: &str, old_name: &str, new_name: &str) -> Result<bool> {
+        if old_name == new_name {
+            return Ok(true);
+        }
+
+        let old_path = self.config.repo_path(owner, old_name);
+        let new_path = self.config.repo_path(owner, new_name);
+
+        if !old_path.exists() || new_path.exists() {
+            return Ok(false);
+        }
+
+        fs::rename(&old_path, &new_path)?;
+        info!(from = %old_path.display(), to = %new_path.display(), "Renamed repository");
+
+        Ok(true)
+    }
+
+    /// Delete a repository
     pub fn delete(&self, owner: &str, name: &str) -> Result<bool> {
         let path = self.config.repo_path(owner, name);
 

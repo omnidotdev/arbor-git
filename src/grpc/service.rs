@@ -25,10 +25,10 @@ use crate::proto::{
     GetRepositoryInfoRequest, GetTreeRequest, GetTreeResponse, GitSignature, InitRepositoryRequest,
     InitRepositoryResponse, ListRefsRequest, ListRefsResponse, MergeRequest, MergeResponse,
     RebaseRequest, RebaseResponse, ReceivePackRequest, ReceivePackResponse, Ref, RefType,
-    RepositoryExistsRequest, RepositoryExistsResponse, RepositoryInfo, RepositoryPath,
-    ResolveRefRequest, ResolveRefResponse, SetDefaultBranchRequest, SetDefaultBranchResponse,
-    TreeEntry, TreeEntryMode, TreeEntryType, UploadPackRequest, UploadPackResponse,
-    git_service_server,
+    RenameRepositoryRequest, RenameRepositoryResponse, RepositoryExistsRequest,
+    RepositoryExistsResponse, RepositoryInfo, RepositoryPath, ResolveRefRequest,
+    ResolveRefResponse, SetDefaultBranchRequest, SetDefaultBranchResponse, TreeEntry,
+    TreeEntryMode, TreeEntryType, UploadPackRequest, UploadPackResponse, git_service_server,
 };
 
 pub struct GitServiceImpl {
@@ -213,6 +213,25 @@ impl git_service_server::GitService for GitServiceImpl {
 
         let exists = self.repo_service.exists(&repo.owner, &repo.name);
         Ok(Response::new(RepositoryExistsResponse { exists }))
+    }
+
+    #[instrument(skip(self))]
+    async fn rename_repository(
+        &self,
+        request: Request<RenameRepositoryRequest>,
+    ) -> Result<Response<RenameRepositoryResponse>, Status> {
+        let req = request.into_inner();
+        let repo = req
+            .repository
+            .ok_or_else(|| Status::invalid_argument("repository required"))?;
+
+        match self
+            .repo_service
+            .rename(&repo.owner, &repo.name, &req.new_name)
+        {
+            Ok(renamed) => Ok(Response::new(RenameRepositoryResponse { renamed })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
     }
 
     #[instrument(skip(self))]

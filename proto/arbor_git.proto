@@ -11,6 +11,7 @@ service GitService {
   rpc InitRepository(InitRepositoryRequest) returns (InitRepositoryResponse);
   rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteRepositoryResponse);
   rpc RepositoryExists(RepositoryExistsRequest) returns (RepositoryExistsResponse);
+  rpc RenameRepository(RenameRepositoryRequest) returns (RenameRepositoryResponse);
   rpc GetRepositoryInfo(GetRepositoryInfoRequest) returns (RepositoryInfo);
 
   // References
@@ -82,6 +83,15 @@ message RepositoryExistsRequest {
 
 message RepositoryExistsResponse {
   bool exists = 1;
+}
+
+message RenameRepositoryRequest {
+  RepositoryPath repository = 1;   // current owner + name
+  string new_name = 2;             // new repository name (same owner)
+}
+
+message RenameRepositoryResponse {
+  bool renamed = 1;
 }
 
 message GetRepositoryInfoRequest {
