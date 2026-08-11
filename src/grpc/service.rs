@@ -127,7 +127,11 @@ fn spawn_and_stream(
 ) -> Result<mpsc::Receiver<Result<Vec<u8>, Status>>, Status> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // Serve protocol v2, matching the ref advertisement (which runs under
+    // version=2) and arbor-api's in-process path. Without this the pack process
+    // defaults to v0 and rejects the client's v2 `command=ls-refs` request.
     let mut child = cmd
+        .env("GIT_PROTOCOL", "version=2")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1483,12 +1487,15 @@ mod pack_tests {
             .unwrap();
         let oid = String::from_utf8(out.stdout).unwrap().trim().to_string();
 
-        // A minimal clone request; no side-band, so the packfile is raw in stdout
-        let mut req = pkt_line(&format!(
-            "want {oid} multi_ack ofs-delta agent=arbor-git-test\n"
-        ));
-        req.extend_from_slice(b"0000");
+        // A v2 fetch (the pack process runs under version=2): command, delimiter,
+        // then want/done, then flush. The packfile arrives in side-band, so PACK
+        // is embedded in the streamed response.
+        let mut req = pkt_line("command=fetch\n");
+        req.extend(pkt_line("object-format=sha1\n"));
+        req.extend_from_slice(b"0001");
+        req.extend(pkt_line(&format!("want {oid}\n")));
         req.extend(pkt_line("done\n"));
+        req.extend_from_slice(b"0000");
 
         let (tx, rx) = mpsc::channel(4);
         tx.send(req).await.unwrap();
@@ -1512,6 +1519,54 @@ mod pack_tests {
         let (_tx, rx) = mpsc::channel(1);
         let result = run_git_pack("upload-pack", &storage.path().join("nope.git"), rx);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn upload_pack_speaks_protocol_v2() {
+        // A real git client negotiates v2 off the (v2) advertisement and then
+        // sends `command=ls-refs`; the pack process must run under version=2 or it
+        // rejects that with "expected to get object ID, not 'command=ls-refs'".
+        let storage = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: storage.path().to_path_buf(),
+            ..Default::default()
+        };
+        RepositoryService::new(config.clone())
+            .init("owner", "repo", Some("main"))
+            .unwrap();
+        let bare = config.repo_path("owner", "repo");
+
+        let work = tempdir().unwrap();
+        git(&["init", "-q", "-b", "main", "."], work.path());
+        std::fs::write(work.path().join("f.txt"), "hi").unwrap();
+        git(&["add", "."], work.path());
+        git(&["commit", "-q", "-m", "c"], work.path());
+        git(
+            &["push", "-q", bare.to_str().unwrap(), "main:main"],
+            work.path(),
+        );
+
+        // v2 ls-refs: command, delimiter (0001), flush (0000)
+        let mut req = pkt_line("command=ls-refs\n");
+        req.extend_from_slice(b"0001");
+        req.extend_from_slice(b"0000");
+
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(req).await.unwrap();
+        drop(tx);
+
+        let mut out_rx = run_git_pack("upload-pack", &bare, rx).unwrap();
+        let mut response = Vec::new();
+        while let Some(chunk) = out_rx.recv().await {
+            // a protocol error surfaces as an Err chunk here (fails the test)
+            response.extend(chunk.expect("v2 ls-refs must not protocol-error"));
+        }
+
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.contains("refs/heads/main"),
+            "v2 ls-refs should list main: {text}"
+        );
     }
 
     #[tokio::test]
