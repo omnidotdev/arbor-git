@@ -741,6 +741,7 @@ impl git_service_server::GitService for GitServiceImpl {
                             new_oid: file.new_oid.unwrap_or_default(),
                             additions,
                             deletions,
+                            is_binary: file.is_binary,
                         };
 
                         if tx.send(Ok(entry)).await.is_err() {
