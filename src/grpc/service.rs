@@ -23,12 +23,13 @@ use crate::proto::{
     DiffStatus, FileDiff, GetBlobInfoRequest, GetBlobRequest, GetCommitAncestorsRequest,
     GetCommitLogRequest, GetCommitRequest, GetDiffRequest, GetFileDiffRequest,
     GetRepositoryInfoRequest, GetTreeRequest, GetTreeResponse, GitSignature, InitRepositoryRequest,
-    InitRepositoryResponse, ListRefsRequest, ListRefsResponse, MergeRequest, MergeResponse,
-    RebaseRequest, RebaseResponse, ReceivePackRequest, ReceivePackResponse, Ref, RefType,
-    RenameRepositoryRequest, RenameRepositoryResponse, RepositoryExistsRequest,
-    RepositoryExistsResponse, RepositoryInfo, RepositoryPath, ResolveRefRequest,
-    ResolveRefResponse, SetDefaultBranchRequest, SetDefaultBranchResponse, TreeEntry,
-    TreeEntryMode, TreeEntryType, UploadPackRequest, UploadPackResponse, git_service_server,
+    InitRepositoryResponse, ListRefsRequest, ListRefsResponse, MergeChangeRequest,
+    MergeChangeResponse, MergeRequest, MergeResponse, RebaseRequest, RebaseResponse,
+    ReceivePackRequest, ReceivePackResponse, Ref, RefType, RenameRepositoryRequest,
+    RenameRepositoryResponse, RepositoryExistsRequest, RepositoryExistsResponse, RepositoryInfo,
+    RepositoryPath, ResolveRefRequest, ResolveRefResponse, SetDefaultBranchRequest,
+    SetDefaultBranchResponse, TreeEntry, TreeEntryMode, TreeEntryType, UploadPackRequest,
+    UploadPackResponse, git_service_server,
 };
 
 pub struct GitServiceImpl {
@@ -141,6 +142,120 @@ fn run_git_pack(
     });
 
     Ok(rx)
+}
+
+/// Run a git plumbing command in a bare repository and return its output.
+async fn git_plumbing(
+    repo_path: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::Output, Status> {
+    tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| Status::internal(format!("failed to run git: {e}")))
+}
+
+/// Land a stacked change onto a target branch with arbor's stack semantics: the
+/// change's tree becomes the result (fast-forward when it already builds on the
+/// tip, otherwise a merge commit parented on both). Uses real git plumbing
+/// (`merge-base --is-ancestor`, `commit-tree`, atomic `update-ref`) so it matches
+/// the in-process path exactly. Returns (resulting target tip, mode).
+async fn merge_change(
+    repo_path: &std::path::Path,
+    commit_oid: &str,
+    target_branch: &str,
+    author_name: &str,
+    author_email: &str,
+    message: &str,
+) -> Result<(String, String), Status> {
+    if !repo_path.exists() {
+        return Err(Status::not_found("repository not found"));
+    }
+    let target_ref = format!("refs/heads/{target_branch}");
+
+    let target = git_plumbing(repo_path, &["rev-parse", "--verify", &target_ref]).await?;
+    if !target.status.success() {
+        return Err(Status::not_found("target branch not found"));
+    }
+    let target_sha = String::from_utf8_lossy(&target.stdout).trim().to_string();
+
+    // The change is already contained in the target: nothing to advance
+    let contained = git_plumbing(
+        repo_path,
+        &["merge-base", "--is-ancestor", commit_oid, &target_sha],
+    )
+    .await?;
+    if contained.status.success() {
+        return Ok((target_sha, "already-merged".to_string()));
+    }
+
+    // The change builds directly on the tip: fast-forward
+    let fast_forward = git_plumbing(
+        repo_path,
+        &["merge-base", "--is-ancestor", &target_sha, commit_oid],
+    )
+    .await?;
+    if fast_forward.status.success() {
+        let updated = git_plumbing(
+            repo_path,
+            &["update-ref", &target_ref, commit_oid, &target_sha],
+        )
+        .await?;
+        if !updated.status.success() {
+            return Err(Status::internal("failed to advance the target branch"));
+        }
+        return Ok((commit_oid.to_string(), "fast-forward".to_string()));
+    }
+
+    // Diverged: a merge commit whose tree IS the change's tree, parented on both
+    let tree = git_plumbing(
+        repo_path,
+        &["rev-parse", "--verify", &format!("{commit_oid}^{{tree}}")],
+    )
+    .await?;
+    if !tree.status.success() {
+        return Err(Status::not_found("change commit not found"));
+    }
+    let change_tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+
+    let created = tokio::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(repo_path)
+        .args([
+            "commit-tree",
+            &change_tree,
+            "-p",
+            &target_sha,
+            "-p",
+            commit_oid,
+            "-m",
+            message,
+        ])
+        .env("GIT_AUTHOR_NAME", author_name)
+        .env("GIT_AUTHOR_EMAIL", author_email)
+        .env("GIT_COMMITTER_NAME", author_name)
+        .env("GIT_COMMITTER_EMAIL", author_email)
+        .output()
+        .await
+        .map_err(|e| Status::internal(format!("failed to run git: {e}")))?;
+    if !created.status.success() {
+        return Err(Status::internal("failed to create the merge commit"));
+    }
+    let merge_sha = String::from_utf8_lossy(&created.stdout).trim().to_string();
+
+    let updated = git_plumbing(
+        repo_path,
+        &["update-ref", &target_ref, &merge_sha, &target_sha],
+    )
+    .await?;
+    if !updated.status.success() {
+        return Err(Status::internal("failed to advance the target branch"));
+    }
+
+    Ok((merge_sha, "merge-commit".to_string()))
 }
 
 type StreamResult<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -825,6 +940,30 @@ impl git_service_server::GitService for GitServiceImpl {
     // ========================================================================
 
     #[instrument(skip(self))]
+    async fn merge_change(
+        &self,
+        request: Request<MergeChangeRequest>,
+    ) -> Result<Response<MergeChangeResponse>, Status> {
+        let req = request.into_inner();
+        let repo = req
+            .repository
+            .ok_or_else(|| Status::invalid_argument("repository required"))?;
+
+        let repo_path = self.config.repo_path(&repo.owner, &repo.name);
+        let (sha, mode) = merge_change(
+            &repo_path,
+            &req.commit_oid,
+            &req.target_branch,
+            &req.author_name,
+            &req.author_email,
+            &req.message,
+        )
+        .await?;
+
+        Ok(Response::new(MergeChangeResponse { sha, mode }))
+    }
+
+    #[instrument(skip(self))]
     async fn merge(
         &self,
         request: Request<MergeRequest>,
@@ -1246,5 +1385,145 @@ mod pack_tests {
         let (_tx, rx) = mpsc::channel(1);
         let result = run_git_pack("upload-pack", &storage.path().join("nope.git"), rx);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod merge_change_tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+    use tempfile::tempdir;
+
+    fn git(cwd: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = StdCommand::new("git");
+        if let Some(dir) = cwd {
+            cmd.arg("-C").arg(dir);
+        }
+        cmd.args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap()
+    }
+
+    fn ok(cwd: Option<&Path>, args: &[&str]) -> String {
+        let out = git(cwd, args);
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn merge_change_covers_all_three_modes() {
+        let storage = tempdir().unwrap();
+        let bare = storage.path().join("o").join("r.git");
+        git(
+            None,
+            &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
+
+        let work = tempdir().unwrap();
+        let w = work.path();
+        git(Some(w), &["init", "-q", "-b", "main"]);
+        std::fs::write(w.join("a.txt"), "a").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "a"]);
+        let a = ok(Some(w), &["rev-parse", "HEAD"]);
+        ok(
+            Some(w),
+            &["push", "-q", bare.to_str().unwrap(), "main:main"],
+        );
+
+        // B builds on A (fast-forward candidate)
+        std::fs::write(w.join("b.txt"), "b").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "b"]);
+        let b = ok(Some(w), &["rev-parse", "HEAD"]);
+        ok(
+            Some(w),
+            &[
+                "push",
+                "-q",
+                bare.to_str().unwrap(),
+                "HEAD:refs/heads/feature",
+            ],
+        );
+
+        // fast-forward: main (A) is an ancestor of B
+        let (sha, mode) = merge_change(&bare, &b, "main", "t", "t@t", "m")
+            .await
+            .unwrap();
+        assert_eq!(mode, "fast-forward");
+        assert_eq!(sha, b);
+        assert_eq!(
+            ok(
+                None,
+                &["--git-dir", bare.to_str().unwrap(), "rev-parse", "main"]
+            ),
+            b
+        );
+
+        // already-merged: A is now contained in main (B)
+        let (sha, mode) = merge_change(&bare, &a, "main", "t", "t@t", "m")
+            .await
+            .unwrap();
+        assert_eq!(mode, "already-merged");
+        assert_eq!(sha, b);
+
+        // C diverges from A (sibling of B)
+        ok(Some(w), &["reset", "--hard", "-q", &a]);
+        std::fs::write(w.join("c.txt"), "c").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "c"]);
+        let c = ok(Some(w), &["rev-parse", "HEAD"]);
+        ok(
+            Some(w),
+            &[
+                "push",
+                "-q",
+                bare.to_str().unwrap(),
+                "HEAD:refs/heads/other",
+            ],
+        );
+
+        // merge-commit: main (B) and C diverged -> a merge commit whose tree is C's
+        let (sha, mode) = merge_change(&bare, &c, "main", "t", "t@t", "landing")
+            .await
+            .unwrap();
+        assert_eq!(mode, "merge-commit");
+        let bare_s = bare.to_str().unwrap();
+        assert_eq!(ok(None, &["--git-dir", bare_s, "rev-parse", "main"]), sha);
+        // its tree is the change's tree, wholesale
+        assert_eq!(
+            ok(
+                None,
+                &["--git-dir", bare_s, "rev-parse", &format!("{sha}^{{tree}}")]
+            ),
+            ok(
+                None,
+                &["--git-dir", bare_s, "rev-parse", &format!("{c}^{{tree}}")]
+            )
+        );
+        // parented on the old target tip then the change
+        assert_eq!(
+            ok(
+                None,
+                &["--git-dir", bare_s, "rev-parse", &format!("{sha}^1")]
+            ),
+            b
+        );
+        assert_eq!(
+            ok(
+                None,
+                &["--git-dir", bare_s, "rev-parse", &format!("{sha}^2")]
+            ),
+            c
+        );
     }
 }

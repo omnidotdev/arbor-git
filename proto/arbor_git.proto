@@ -39,6 +39,7 @@ service GitService {
 
   // Advanced operations
   rpc Merge(MergeRequest) returns (MergeResponse);
+  rpc MergeChange(MergeChangeRequest) returns (MergeChangeResponse);
   rpc Rebase(RebaseRequest) returns (RebaseResponse);
   rpc CherryPick(CherryPickRequest) returns (CherryPickResponse);
 
@@ -393,6 +394,22 @@ message MergeResponse {
   bool success = 1;
   optional string merge_commit_oid = 2;
   repeated ConflictInfo conflicts = 3;
+}
+
+// Land a stacked change onto a target branch, taking the change's tree wholesale
+// (fast-forward, or a merge commit parented on both). Not a 3-way content merge.
+message MergeChangeRequest {
+  RepositoryPath repository = 1;
+  string commit_oid = 2;      // the change commit to land
+  string target_branch = 3;   // short branch name to advance
+  string author_name = 4;
+  string author_email = 5;
+  string message = 6;         // merge commit message (used when a merge commit is created)
+}
+
+message MergeChangeResponse {
+  string sha = 1;             // the target's tip after landing
+  string mode = 2;            // "fast-forward" | "merge-commit" | "already-merged"
 }
 
 message ConflictInfo {
