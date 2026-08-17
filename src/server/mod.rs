@@ -1,14 +1,7 @@
 use std::net::SocketAddr;
 
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post},
-};
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use tonic::transport::Server as TonicServer;
-use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 use crate::git::StorageConfig;
@@ -69,21 +62,13 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         .add_service(GitServiceServer::new(git_service))
         .serve(config.grpc_addr);
 
-    // Create HTTP server (for health checks and Git Smart HTTP protocol)
+    // Create HTTP server. It only serves health and readiness probes; pack
+    // transport is gRPC-only. No CORS layer is mounted because no browser calls
+    // these endpoints (they are hit by in-cluster orchestration probes)
     let state = AppState { storage };
     let http_router = Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
-        // Git Smart HTTP endpoints (to be implemented)
-        .route("/{owner}/{repo}/info/refs", get(git_info_refs))
-        .route("/{owner}/{repo}/git-upload-pack", post(git_upload_pack))
-        .route("/{owner}/{repo}/git-receive-pack", post(git_receive_pack))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
         .with_state(state);
 
     let http_server = axum::serve(
@@ -125,48 +110,4 @@ async fn readiness_check(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "Storage not available")
     }
-}
-
-/// Git Smart HTTP: info/refs endpoint
-async fn git_info_refs(
-    State(_state): State<AppState>,
-    Path((_owner, _repo)): Path<(String, String)>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let service = params.get("service").map(std::string::String::as_str);
-
-    match service {
-        Some("git-upload-pack" | "git-receive-pack") => {
-            // TODO: Implement proper Git protocol response
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                "Git Smart HTTP not yet implemented",
-            )
-        }
-        _ => (StatusCode::BAD_REQUEST, "Invalid service parameter"),
-    }
-}
-
-/// Git Smart HTTP: git-upload-pack endpoint (clone/fetch)
-async fn git_upload_pack(
-    State(_state): State<AppState>,
-    Path((_owner, _repo)): Path<(String, String)>,
-    _body: axum::body::Bytes,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "git-upload-pack not yet implemented",
-    )
-}
-
-/// Git Smart HTTP: git-receive-pack endpoint (push)
-async fn git_receive_pack(
-    State(_state): State<AppState>,
-    Path((_owner, _repo)): Path<(String, String)>,
-    _body: axum::body::Bytes,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "git-receive-pack not yet implemented",
-    )
 }

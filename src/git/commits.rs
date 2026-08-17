@@ -42,7 +42,7 @@ impl CommitService {
             oid: oid.to_string(),
         })?;
 
-        Ok(commit_to_info(&commit))
+        commit_to_info(&commit)
     }
 
     /// Get commit log starting from a reference
@@ -86,7 +86,7 @@ impl CommitService {
                 continue;
             }
 
-            commits.push(commit_to_info(&commit));
+            commits.push(commit_to_info(&commit)?);
         }
 
         Ok(commits)
@@ -119,7 +119,7 @@ impl CommitService {
         for info in walk.skip(1).take(take_count) {
             let info = info.map_err(|e| GitError::Gix(e.to_string()))?;
             let commit = info.object().map_err(|e| GitError::Gix(e.to_string()))?;
-            commits.push(commit_to_info(&commit));
+            commits.push(commit_to_info(&commit)?);
         }
 
         Ok(commits)
@@ -155,16 +155,21 @@ impl CommitService {
     }
 }
 
-fn commit_to_info(commit: &gix::Commit) -> CommitInfo {
-    let author = commit.author().expect("commit has author");
-    let committer = commit.committer().expect("commit has committer");
+fn commit_to_info(commit: &gix::Commit) -> Result<CommitInfo> {
+    // A malformed or truncated commit object can fail to decode these headers, so
+    // propagate the decode failure instead of panicking the handler thread
+    let author = commit.author().map_err(|e| GitError::Gix(e.to_string()))?;
+    let committer = commit
+        .committer()
+        .map_err(|e| GitError::Gix(e.to_string()))?;
+    let tree_id = commit.tree_id().map_err(|e| GitError::Gix(e.to_string()))?;
 
     // In gix 0.85 the signature `time` field is the raw header string, so parse it
     // into seconds and offset, defaulting to zero if the timestamp is malformed
     let author_time = author.time().unwrap_or_default();
     let committer_time = committer.time().unwrap_or_default();
 
-    CommitInfo {
+    Ok(CommitInfo {
         oid: commit.id().to_string(),
         message: commit
             .message()
@@ -183,8 +188,8 @@ fn commit_to_info(commit: &gix::Commit) -> CommitInfo {
             offset_minutes: committer_time.offset,
         },
         parent_oids: commit.parent_ids().map(|id| id.to_string()).collect(),
-        tree_oid: commit.tree_id().expect("commit has tree").to_string(),
-    }
+        tree_oid: tree_id.to_string(),
+    })
 }
 
 fn commit_touches_path(repo: &gix::Repository, commit: &gix::Commit, path: &str) -> Result<bool> {

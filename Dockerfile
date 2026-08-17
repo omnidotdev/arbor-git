@@ -33,9 +33,10 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Install runtime dependencies. git is required: upload-pack / receive-pack are
-# served by spawning the real git binary in stateless-RPC mode.
+# served by spawning the real git binary in stateless-RPC mode. wget is a tiny
+# addition used only by the container HEALTHCHECK (the slim base has no curl).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git && \
+    apt-get install -y --no-install-recommends ca-certificates git wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
@@ -50,6 +51,12 @@ USER arbor
 
 # Expose ports
 EXPOSE 50051 8080
+
+# Liveness probe against the HTTP /health endpoint. --spider makes a HEAD-like
+# request without writing the body; -q keeps output quiet so only the exit code
+# matters
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --spider -q http://127.0.0.1:8080/health || exit 1
 
 # Set default environment variables
 ENV RUST_LOG=arbor_git=info,tower_http=info

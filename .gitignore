@@ -21,6 +21,9 @@ debug/
 *.swo
 *~
 
+# Local agent config
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

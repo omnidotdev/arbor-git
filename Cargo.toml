@@ -22,38 +22,30 @@ tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 
-# HTTP server (for Git Smart HTTP protocol)
+# HTTP server (health and readiness probes)
 axum = { version = "0.8", features = ["macros"] }
-tower = "0.5"
-tower-http = { version = "0.7", features = ["cors", "trace"] }
-hyper = { version = "1", features = ["full"] }
 
 # Git - gitoxide
-gix = { version = "0.85", features = ["blocking-http-transport-reqwest-rust-tls"] }
-gix-hash = "0.25"
-gix-object = "0.62"
-gix-pack = "0.72"
-gix-protocol = "0.63"
-gix-transport = "0.57"
-gix-ref = "0.65"
-gix-traverse = "0.59"
+gix = { version = "0.86", features = ["blocking-http-transport-reqwest-rust-tls"] }
+gix-hash = "0.26"
+gix-object = "0.63"
+gix-pack = "0.73"
+gix-protocol = "0.64"
+gix-transport = "0.58"
+gix-ref = "0.66"
+gix-traverse = "0.60"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Database (for repository metadata)
-sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
 
 # Streaming
 tokio-stream = "0.1"
 
 # Utilities
 thiserror = "2"
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 futures = "0.3"
