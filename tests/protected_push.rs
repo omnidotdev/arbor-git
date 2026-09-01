@@ -13,9 +13,15 @@ const BIN: &str = env!("CARGO_BIN_EXE_arbor-git");
 
 fn run(args: &[&str], cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "t")
+    cmd.args(args).current_dir(cwd);
+    // Strip any ambient GIT_* vars (e.g. exported by a pre-commit hook) so the
+    // push acts on cwd and the bare repo rather than the surrounding repo
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GIT_") {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t");

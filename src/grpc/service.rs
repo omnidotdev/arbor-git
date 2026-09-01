@@ -243,18 +243,22 @@ async fn run_advertise_refs(repo_path: &std::path::Path, service: &str) -> Resul
     Ok(out.stdout)
 }
 
-/// Run a git plumbing command in a bare repository and return its output.
+/// Run a git plumbing command in a bare repository and return its output. Shells
+/// out through the shared `git::plumbing::run_git` helper on a blocking task so
+/// the subprocess invocation stays identical to the operations service.
 async fn git_plumbing(
     repo_path: &std::path::Path,
     args: &[&str],
 ) -> Result<std::process::Output, Status> {
-    tokio::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(repo_path)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| Status::internal(format!("failed to run git: {e}")))
+    let dir = repo_path.to_path_buf();
+    let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    tokio::task::spawn_blocking(move || {
+        let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+        crate::git::plumbing::run_git(&dir, &borrowed, &[])
+    })
+    .await
+    .map_err(|e| Status::internal(format!("git task failed: {e}")))?
+    .map_err(|e| Status::internal(format!("failed to run git: {e}")))
 }
 
 /// Land a stacked change onto a target branch with arbor's stack semantics: the
@@ -1087,35 +1091,66 @@ impl git_service_server::GitService for GitServiceImpl {
             },
         );
 
-        match self.ops_service.merge(
-            &repo.owner,
-            &repo.name,
-            &req.base_ref,
-            &req.head_ref,
-            &author,
-            req.commit_message.as_deref(),
-            true, // allow fast-forward
-        ) {
-            Ok(result) => {
-                let conflicts: Vec<crate::proto::ConflictInfo> = result
-                    .conflicts
-                    .into_iter()
-                    .map(|c| crate::proto::ConflictInfo {
-                        path: c.path,
-                        base_oid: c.ancestor_oid.unwrap_or_default(),
-                        ours_oid: c.ours_oid.unwrap_or_default(),
-                        theirs_oid: c.theirs_oid.unwrap_or_default(),
-                    })
-                    .collect();
+        let strategy = crate::proto::MergeStrategy::try_from(req.strategy)
+            .unwrap_or(crate::proto::MergeStrategy::Unspecified);
 
-                Ok(Response::new(MergeResponse {
-                    success: result.status == crate::git::operations::MergeStatus::Success
-                        || result.status == crate::git::operations::MergeStatus::FastForward
-                        || result.status == crate::git::operations::MergeStatus::AlreadyUpToDate,
-                    merge_commit_oid: result.commit_oid,
-                    conflicts,
-                }))
-            }
+        // REBASE replays the head onto the base and reports the rewritten head as
+        // the resulting commit
+        if strategy == crate::proto::MergeStrategy::Rebase {
+            return match self.ops_service.rebase(
+                &repo.owner,
+                &repo.name,
+                &req.head_ref,
+                &req.base_ref,
+                None,
+            ) {
+                Ok(result) => Ok(Response::new(MergeResponse {
+                    success: matches!(
+                        result.status,
+                        crate::git::operations::RebaseStatus::Success
+                            | crate::git::operations::RebaseStatus::NothingToRebase
+                    ),
+                    merge_commit_oid: result.new_head_oid,
+                    conflicts: map_conflicts(result.conflicts),
+                })),
+                Err(e) => Err(Status::internal(e.to_string())),
+            };
+        }
+
+        // SQUASH records a single-parent commit; MERGE (or UNSPECIFIED) a
+        // two-parent merge commit and may fast-forward
+        let outcome = if strategy == crate::proto::MergeStrategy::Squash {
+            self.ops_service.squash(
+                &repo.owner,
+                &repo.name,
+                &req.base_ref,
+                &req.head_ref,
+                &author,
+                req.commit_message.as_deref(),
+            )
+        } else {
+            self.ops_service.merge(
+                &repo.owner,
+                &repo.name,
+                &req.base_ref,
+                &req.head_ref,
+                &author,
+                req.commit_message.as_deref(),
+                true, // allow fast-forward
+            )
+        };
+
+        match outcome {
+            Ok(result) => Ok(Response::new(MergeResponse {
+                success: matches!(
+                    result.status,
+                    crate::git::operations::MergeStatus::Success
+                        | crate::git::operations::MergeStatus::FastForward
+                        | crate::git::operations::MergeStatus::AlreadyUpToDate
+                ),
+                merge_commit_oid: result.commit_oid,
+                conflicts: map_conflicts(result.conflicts),
+            })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -1134,25 +1169,15 @@ impl git_service_server::GitService for GitServiceImpl {
             .ops_service
             .rebase(&repo.owner, &repo.name, &req.branch, &req.onto, None)
         {
-            Ok(result) => {
-                let conflicts: Vec<crate::proto::ConflictInfo> = result
-                    .conflicts
-                    .into_iter()
-                    .map(|c| crate::proto::ConflictInfo {
-                        path: c.path,
-                        base_oid: c.ancestor_oid.unwrap_or_default(),
-                        ours_oid: c.ours_oid.unwrap_or_default(),
-                        theirs_oid: c.theirs_oid.unwrap_or_default(),
-                    })
-                    .collect();
-
-                Ok(Response::new(RebaseResponse {
-                    success: result.status == crate::git::operations::RebaseStatus::Success
-                        || result.status == crate::git::operations::RebaseStatus::NothingToRebase,
-                    rewritten_commits: result.rebased_commits,
-                    conflicts,
-                }))
-            }
+            Ok(result) => Ok(Response::new(RebaseResponse {
+                success: matches!(
+                    result.status,
+                    crate::git::operations::RebaseStatus::Success
+                        | crate::git::operations::RebaseStatus::NothingToRebase
+                ),
+                rewritten_commits: result.rebased_commits,
+                conflicts: map_conflicts(result.conflicts),
+            })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -1432,6 +1457,20 @@ const fn file_status_to_proto(status: crate::git::diff::FileStatus) -> i32 {
     }
 }
 
+fn map_conflicts(
+    conflicts: Vec<crate::git::operations::ConflictInfo>,
+) -> Vec<crate::proto::ConflictInfo> {
+    conflicts
+        .into_iter()
+        .map(|c| crate::proto::ConflictInfo {
+            path: c.path,
+            base_oid: c.ancestor_oid.unwrap_or_default(),
+            ours_oid: c.ours_oid.unwrap_or_default(),
+            theirs_oid: c.theirs_oid.unwrap_or_default(),
+        })
+        .collect()
+}
+
 const fn line_type_to_proto(line_type: crate::git::diff::LineType) -> i32 {
     match line_type {
         crate::git::diff::LineType::Context => DiffLineType::Context as i32,
@@ -1454,9 +1493,16 @@ mod pack_tests {
     }
 
     fn git(args: &[&str], cwd: &std::path::Path) {
-        let status = StdCommand::new("git")
-            .args(args)
-            .current_dir(cwd)
+        let mut cmd = StdCommand::new("git");
+        cmd.args(args).current_dir(cwd);
+        // Strip any ambient GIT_* vars (e.g. exported by a pre-commit hook) so
+        // seeding acts on cwd rather than the surrounding repo
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let status = cmd
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
@@ -1658,8 +1704,15 @@ mod merge_change_tests {
         if let Some(dir) = cwd {
             cmd.arg("-C").arg(dir);
         }
-        cmd.args(args)
-            .env("GIT_AUTHOR_NAME", "t")
+        cmd.args(args);
+        // Strip any ambient GIT_* vars (e.g. exported by a pre-commit hook) so
+        // seeding acts on the tempdir rather than the surrounding repo
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        cmd.env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
@@ -1783,5 +1836,113 @@ mod merge_change_tests {
             ),
             c
         );
+    }
+
+    // 5d: the gRPC merge handler honors each MergeStrategy and returns a real OID
+    #[tokio::test]
+    async fn merge_handler_wires_all_strategies() {
+        use crate::proto::{MergeRequest, MergeStrategy, RepositoryPath};
+        use git_service_server::GitService;
+
+        let storage = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: storage.path().to_path_buf(),
+            ..Default::default()
+        };
+        let bare = config.repo_path("o", "r");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            None,
+            &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
+        let bare_s = bare.to_str().unwrap();
+
+        // base commit on main
+        let work = tempdir().unwrap();
+        let w = work.path();
+        git(Some(w), &["init", "-q", "-b", "main"]);
+        std::fs::write(w.join("base.txt"), "base").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "base"]);
+        ok(Some(w), &["push", "-q", bare_s, "main:main"]);
+
+        // feature diverges: add feature.txt
+        ok(Some(w), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(w.join("feature.txt"), "feature").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "feat"]);
+        ok(Some(w), &["push", "-q", bare_s, "feature:feature"]);
+
+        // main advances independently: add main.txt
+        ok(Some(w), &["checkout", "-q", "main"]);
+        std::fs::write(w.join("main.txt"), "main").unwrap();
+        ok(Some(w), &["add", "."]);
+        ok(Some(w), &["commit", "-q", "-m", "mainadv"]);
+        ok(Some(w), &["push", "-q", bare_s, "main:main"]);
+
+        let svc = GitServiceImpl::new(config);
+
+        // Each strategy operates on the same seeded state (none moves a ref)
+        for strategy in [
+            MergeStrategy::Merge,
+            MergeStrategy::Squash,
+            MergeStrategy::Rebase,
+        ] {
+            let req = MergeRequest {
+                repository: Some(RepositoryPath {
+                    owner: "o".into(),
+                    name: "r".into(),
+                }),
+                base_ref: "refs/heads/main".into(),
+                head_ref: "refs/heads/feature".into(),
+                strategy: strategy as i32,
+                commit_message: Some("landing".into()),
+                author: None,
+            };
+            let resp = svc.merge(Request::new(req)).await.unwrap().into_inner();
+            assert!(resp.success, "{strategy:?} should succeed: {resp:?}");
+            let oid = resp.merge_commit_oid.expect("a real commit oid");
+
+            // it is a real commit object
+            let kind = ok(None, &["--git-dir", bare_s, "cat-file", "-t", &oid]);
+            assert_eq!(kind, "commit", "{strategy:?} oid should be a commit");
+
+            let parents = ok(
+                None,
+                &[
+                    "--git-dir",
+                    bare_s,
+                    "rev-list",
+                    "--parents",
+                    "-n",
+                    "1",
+                    &oid,
+                ],
+            );
+            let nparents = parents.split_whitespace().count() - 1;
+            let main_tip = ok(None, &["--git-dir", bare_s, "rev-parse", "refs/heads/main"]);
+            let p1 = ok(
+                None,
+                &["--git-dir", bare_s, "rev-parse", &format!("{oid}^1")],
+            );
+
+            match strategy {
+                MergeStrategy::Merge => assert_eq!(nparents, 2, "merge is two-parent"),
+                MergeStrategy::Squash => {
+                    assert_eq!(nparents, 1, "squash is single-parent");
+                    assert_eq!(p1, main_tip, "squash parent is the base tip");
+                }
+                MergeStrategy::Rebase => {
+                    assert_eq!(nparents, 1, "rebased head is single-parent");
+                    assert_eq!(p1, main_tip, "rebased head sits on the base tip");
+                    let tree = ok(
+                        None,
+                        &["--git-dir", bare_s, "ls-tree", "-r", "--name-only", &oid],
+                    );
+                    assert!(tree.contains("feature.txt"), "rebase replays the change");
+                }
+                MergeStrategy::Unspecified => unreachable!(),
+            }
+        }
     }
 }

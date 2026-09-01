@@ -2,6 +2,7 @@ pub mod commits;
 pub mod diff;
 pub mod hook;
 pub mod operations;
+pub mod plumbing;
 pub mod refs;
 pub mod repository;
 pub mod scope_match;
