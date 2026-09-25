@@ -71,7 +71,11 @@ impl CommitService {
             .map_err(|e| GitError::Gix(e.to_string()))?;
 
         let skip_count = skip.unwrap_or(0) as usize;
-        let take_count = limit.unwrap_or(100) as usize;
+        // `None` means unlimited (the proto maps limit 0 -> None). Defaulting to
+        // 100 here silently capped the walk, so callers that need full history
+        // (e.g. last-commit-per-tree-entry) missed every file not touched within
+        // the most recent 100 commits, leaving those entries with no commit shown.
+        let take_count = limit.map_or(usize::MAX, |l| l as usize);
 
         let mut commits = Vec::new();
 
