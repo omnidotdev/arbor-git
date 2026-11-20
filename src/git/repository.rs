@@ -58,19 +58,45 @@ impl RepositoryService {
     /// the source is missing or the target already exists, so a rename never
     /// clobbers another repository.
     pub fn rename(&self, owner: &str, old_name: &str, new_name: &str) -> Result<bool> {
-        if old_name == new_name {
+        self.relocate(owner, old_name, owner, new_name)
+    }
+
+    /// Move a repository to another owner path (and name), as when it is
+    /// transferred to another organization and a new owner. The bare
+    /// directory moves as-is, so every ref, object and its history comes
+    /// along. Guarded like [`Self::rename`]: a no-op when nothing changes, and
+    /// refused (Ok(false)) when the source is missing or the target exists
+    pub fn relocate(
+        &self,
+        owner: &str,
+        name: &str,
+        new_owner: &str,
+        new_name: &str,
+    ) -> Result<bool> {
+        if owner == new_owner && name == new_name {
             return Ok(true);
         }
 
-        let old_path = self.config.repo_path(owner, old_name);
-        let new_path = self.config.repo_path(owner, new_name);
+        let old_path = self.config.repo_path(owner, name);
+        let new_path = self.config.repo_path(new_owner, new_name);
 
         if !old_path.exists() || new_path.exists() {
             return Ok(false);
         }
 
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::rename(&old_path, &new_path)?;
-        info!(from = %old_path.display(), to = %new_path.display(), "Renamed repository");
+        info!(from = %old_path.display(), to = %new_path.display(), "Moved repository");
+
+        // Clean up an owner directory the move emptied
+        if owner != new_owner
+            && let Some(parent) = old_path.parent()
+            && parent.read_dir()?.next().is_none()
+        {
+            let _ = fs::remove_dir(parent);
+        }
 
         Ok(true)
     }
@@ -209,6 +235,49 @@ mod tests {
         let path = service.init("testowner", "testrepo", Some("main")).unwrap();
         assert!(Path::new(&path).exists());
         assert!(service.exists("testowner", "testrepo"));
+    }
+
+    #[test]
+    fn relocate_moves_a_repository_to_another_owner_with_its_history() {
+        let temp = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let service = RepositoryService::new(config);
+        service.init("alice", "site", Some("master")).unwrap();
+        // A marker standing in for the repository's objects and refs
+        let marker = temp.path().join("alice/site.git/refs/heads/master");
+        fs::write(&marker, "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+
+        assert!(service.relocate("alice", "site", "bob", "site").unwrap());
+        assert!(!service.exists("alice", "site"));
+        assert!(service.exists("bob", "site"));
+        assert!(temp.path().join("bob/site.git/refs/heads/master").exists());
+        // The emptied owner directory is gone
+        assert!(!temp.path().join("alice").exists());
+    }
+
+    #[test]
+    fn relocate_never_clobbers_or_invents_a_repository() {
+        let temp = tempdir().unwrap();
+        let config = StorageConfig {
+            base_path: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let service = RepositoryService::new(config);
+        service.init("alice", "site", None).unwrap();
+        service.init("bob", "site", None).unwrap();
+
+        assert!(!service.relocate("alice", "site", "bob", "site").unwrap());
+        assert!(service.exists("alice", "site"));
+        assert!(
+            !service
+                .relocate("carol", "missing", "bob", "other")
+                .unwrap()
+        );
+        // Unchanged is a no-op
+        assert!(service.relocate("alice", "site", "alice", "site").unwrap());
     }
 
     #[test]

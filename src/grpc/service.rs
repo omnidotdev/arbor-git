@@ -439,9 +439,15 @@ impl git_service_server::GitService for GitServiceImpl {
             .repository
             .ok_or_else(|| Status::invalid_argument("repository required"))?;
 
+        // An empty new owner keeps the current one (a plain rename)
+        let new_owner = if req.new_owner.is_empty() {
+            repo.owner.as_str()
+        } else {
+            req.new_owner.as_str()
+        };
         match self
             .repo_service
-            .rename(&repo.owner, &repo.name, &req.new_name)
+            .relocate(&repo.owner, &repo.name, new_owner, &req.new_name)
         {
             Ok(renamed) => Ok(Response::new(RenameRepositoryResponse { renamed })),
             Err(e) => Err(Status::internal(e.to_string())),
@@ -1455,6 +1461,10 @@ mod pack_tests {
 
     fn git(args: &[&str], cwd: &std::path::Path) {
         let status = StdCommand::new("git")
+            // A git hook exports its repository's GIT_* variables; ignore them
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE")
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "t")
@@ -1490,6 +1500,10 @@ mod pack_tests {
         );
 
         let out = StdCommand::new("git")
+            // A git hook exports its repository's GIT_* variables; ignore them
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE")
             .args([
                 "--git-dir",
                 bare.to_str().unwrap(),
@@ -1655,6 +1669,11 @@ mod merge_change_tests {
 
     fn git(cwd: Option<&Path>, args: &[&str]) -> std::process::Output {
         let mut cmd = StdCommand::new("git");
+        // A git hook (this crate's own pre-commit runs these tests) exports
+        // its repository's GIT_* variables; never let them aim at the wrong repo
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE");
         if let Some(dir) = cwd {
             cmd.arg("-C").arg(dir);
         }

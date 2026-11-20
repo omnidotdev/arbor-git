@@ -13,6 +13,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_arbor-git");
 
 fn run(args: &[&str], cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = Command::new("git");
+    // A git hook (this crate's own pre-commit runs these tests) exports its
+    // repository's GIT_* variables; never let them aim at the wrong repo
+    cmd.env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE");
     cmd.args(args)
         .current_dir(cwd)
         .env("GIT_AUTHOR_NAME", "t")
