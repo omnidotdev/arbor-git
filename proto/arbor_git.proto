@@ -89,7 +89,8 @@ message RepositoryExistsResponse {
 
 message RenameRepositoryRequest {
   RepositoryPath repository = 1;   // current owner + name
-  string new_name = 2;             // new repository name (same owner)
+  string new_name = 2;             // new repository name
+  string new_owner = 3;            // new owner path, empty to keep the owner
 }
 
 message RenameRepositoryResponse {
